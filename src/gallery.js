@@ -29,7 +29,7 @@ const OG_DOWNSCALE_WIDTH = 640;
 
 /* 長寬比索引裡，同一個筆記／檔案路徑可能對應三種 key。
    刪除／改名時三種都要一起清或搬，少一種就會留下永遠回收不掉的孤兒。 */
-const DIM_KEY_PREFIXES = ['', 'og:', 'pdf:'];
+const DIM_KEY_PREFIXES = ['', 'og:', 'pdf:', 'xcal:'];
 
 /* 外掛專屬圖示（2026-07-20）：三個互扣的圓角方塊＝卡片牆意象。
    ⚠️ addIcon() 的內容必須適配 0 0 100 100 的 viewBox，但原稿是 24×24
@@ -588,6 +588,139 @@ function coverFor(app, f, isImg) {
   return src;
 }
 
+/* ===== Excalidraw 縮圖（2026-11-15）=====
+   繪圖檔（.excalidraw.md / 傳統 .excalidraw）原本在卡片牆上長成文字卡：
+     • 內文預覽 = extractPreview 不排程式碼區塊 → 露出的是 JSON／Text Elements 殘片
+     • 同時還排 og:image：firstExternalUrl 對全文跑 regex，繪圖 JSON 裡的
+       "link":"https://…" 必然命中 → 抓來的是「被連結的那個網站」的圖
+   這裡改成顯示繪圖本身的縮圖。渲染不自己來，借 Excalidraw 外掛的匯出管線
+   （它才有完整的手繪字型、內嵌圖片與場景解析）。三條出口由便宜到貴：
+     1. 同目錄的 x.excalidraw.svg／.png（使用者開了「存檔時自動匯出」就會有）
+        → 純公開 API、零渲染，而且和筆記內嵌圖顯示的是同一張檔。
+     2. ea.createSVG(path)：拿**乾淨的 EA 實例**渲染該檔場景。
+     3. 全部失敗 → null，卡片維持原樣（負記錄，不重試、不彈錯）。
+   ⚠️ 為什麼一定要新實例：createSVG 內部是
+        elements = (template 的 elements || []).concat(this.getElements())
+      全域 ea 是使用者腳本共用的，它的 elementsDict 有殘留就會被畫進縮圖。
+      getAPI() 是外掛文件列出的公開方法，回傳新實例並登記進 plugin.eaInstances
+      （外掛卸載時一併 destroy()）；舊版沒有才退回 new ea.constructor(plugin)。
+   ⚠️ 屬性名不會被 minify（esbuild 不 mangle props），實測發布版 main.js 裡
+      createSVG / getAPI / awaitInit / eaInstances / settings.* 都原名可見，
+      會變的只有壓縮後的類別名——所以走 constructor 取實例這條也還算穩。
+   ⚠️ 生成不在 coverFor 裡觸發：it.src 會被 cardKind()/estimateCardHeight()
+      讀到，而虛擬牆對**全部**項目（含螢幕外）估高度（virtual.js relayout 迴圈）。
+      掛在 src 上 = 開一個 200 張繪圖的資料夾，首幀就排 200 次匯出。
+      改為沿用 PDF 那套：卡片捲進視野（_ogObserver）才生。 */
+const XCAL_THUMB_MAX = 40;    // 常駐縮圖筆數上限（值是 dataURL 字串，見 renderXcalThumb）
+const XCAL_THUMB_W = 800;     // 柵格化目標寬：最寬欄位 ~400 CSS px 的 2 倍
+const XCAL_SVG_MAX = 1500000; // 退回存 SVG 字串時的單張上限（1.5MB），超過就放棄這張
+
+/** 這是不是 Excalidraw 繪圖檔？
+    副檔名／檔名優先（零成本，命中絕大多數），只有改過名的 md 才查 frontmatter。 */
+function isXcalFile(app, f) {
+  if (!(f instanceof TFile)) return false;
+  if (f.extension === 'excalidraw') return true;             // 傳統 JSON 格式
+  if (f.extension !== 'md') return false;
+  if (/\.excalidraw\.md$/i.test(f.path)) return true;        // 現行格式
+  const cache = app.metadataCache.getFileCache(f);
+  const fm = cache && cache.frontmatter;
+  return !!(fm && fm['excalidraw-plugin'] != null);          // Excalidraw 自己寫的標記
+}
+
+/** Excalidraw 外掛本體；沒裝／沒啟用回傳 null（呼叫端靜默退回原本卡樣） */
+function getXcalPlugin(app) {
+  try {
+    const p = app.plugins && app.plugins.plugins && app.plugins.plugins['obsidian-excalidraw-plugin'];
+    return (p && p.ea) ? p : null;
+  } catch (e) { return null; }
+}
+
+const _xcalEA = new WeakMap();   // plugin → 乾淨 EA 實例（一個外掛一份，重複用）
+
+/** 取一個乾淨、不污染全域 ea 的 ExcalidrawAutomate 實例。
+    可重複使用：createSVG(path) 只讀檔案場景，不會往實例裡累積東西。
+    ⚠️ 快取到的實例可能已被外掛卸載時 destroy()（停用再啟用 Excalidraw 就會）：
+       destroy() 会把 plugin 清成 null，所以拿 ea.plugin 比對一下就知道還能不能用。 */
+function xcalEA(plugin) {
+  let ea = _xcalEA.get(plugin);
+  if (ea && ea.plugin === plugin) return ea;
+  try {
+    ea = (typeof plugin.ea.getAPI === 'function')
+      ? plugin.ea.getAPI()                      // 公開方法：new ExcalidrawAutomate(plugin)
+      : new plugin.ea.constructor(plugin);      // 舊版兜底
+  } catch (e) { ea = null; }
+  if (ea) _xcalEA.set(plugin, ea);
+  return ea;
+}
+
+/* 兄弟匯出檔（出口 1）。跟外掛自己的 quick preview 同一條件：
+   settings.displayExportedImageIfAvailable 開著才用——那代表使用者就是希望
+   內文顯示匯出檔，卡片跟著用它才會和筆記裡看到的一致。
+   ⚠️ 只認 .excalidraw.md：傳統 .excalidraw 的匯出名是 x.svg（去最後一個點），
+      同資料夾若本來就有無關的 x.svg 會誤拿。 */
+function xcalSibling(app, f, plugin) {
+  if (!/\.excalidraw\.md$/i.test(f.path)) return null;
+  try {
+    if (!plugin || !plugin.settings || plugin.settings.displayExportedImageIfAvailable !== true) return null;
+    const base = f.path.slice(0, f.path.lastIndexOf('.'));
+    for (const ext of ['.svg', '.png']) {
+      const sib = app.vault.getAbstractFileByPath(base + ext);
+      if (sib instanceof TFile) return app.vault.getResourcePath(sib);
+    }
+  } catch (e) {}
+  return null;
+}
+
+/** SVG 的尺寸：width/height 屬性優先，退回 viewBox（柵格化要有個畫布大小）
+    ⚠️ 百分比（"100%"）不是一個可用的像素寬：parseFloat 會讀成 100，
+       拿它算出來的畫布比實際小一個數量級 → 一律當 0 處理，改用 viewBox。 */
+function xcalSvgSize(svg) {
+  const raw = (v) => (v == null ? '' : String(v));
+  const num = (v) => {
+    const s = raw(v);
+    if (/%$/.test(s.trim())) return 0;
+    const n = parseFloat(s);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  };
+  let w = num(svg.getAttribute && svg.getAttribute('width'));
+  let h = num(svg.getAttribute && svg.getAttribute('height'));
+  if (!w || !h) {
+    const vb = svg.getAttribute && svg.getAttribute('viewBox');
+    const p = vb ? String(vb).split(/[\s,]+/).map(num) : [];
+    if (p.length === 4 && p[2] > 0 && p[3] > 0) { w = w || p[2]; h = h || p[3]; }
+  }
+  return { w, h };
+}
+
+/* SVG dataURL → PNG dataURL（目標寬 maxW）。
+   一定要柵格化：匯出得要 embedFont=true，否則手繪字退成系統字、和筆記裡長得不一樣；
+   而內嵌字體之後 SVG 動輒幾百 KB，常駐 40 張就是幾 MB～幾十 MB。柵格化之後常駐的
+   只剩有界的一小張 PNG（取捨同 renderPdfFirstPage）。
+   ⚠️ 尺寸一律按 SVG 自己的 width/height 算，**不要**用 im.naturalWidth：那個值
+      就是 SVG 的原始寬（動則 3000px），拿它當畫布大小等於完全沒壓過。
+   ⚠️ canvas 被弄髒（含 foreignObject 的 SVG 在某些引擎、或引用外部資源時）
+      toDataURL 會拋 → 回 null，呼叫端退回直接用 SVG dataURL：<img> 顯示 SVG
+      不受這個限制，內嵌字體照常生效。 */
+function xcalRasterPng(src, w, h, maxW) {
+  return new Promise((resolve) => {
+    if (!w || !h) { resolve(null); return; }
+    const cw = Math.max(1, Math.round(Math.min(w, maxW)));
+    const ch = Math.max(1, Math.round(h * (cw / w)));
+    const im = new Image();
+    im.onload = () => {
+      try {
+        const c = document.createElement('canvas');
+        c.width = cw; c.height = ch;
+        c.getContext('2d').drawImage(im, 0, 0, cw, ch);
+        resolve(c.toDataURL('image/png'));
+      } catch (e) { resolve(null); }
+    };
+    im.onerror = () => resolve(null);
+    im.decoding = 'async';
+    im.src = src;
+  });
+}
+
 function itemFromFile(app, f) {
   const isImg = IMG_EXT.test(f.path);
   const it = {
@@ -611,6 +744,17 @@ function itemFromFile(app, f) {
     },
     set(v) {
       Object.defineProperty(it, 'src', { value: v, writable: true, enumerable: true, configurable: true });
+    },
+  });
+  /* 是否 Excalidraw 繪圖檔：同樣惰性（只有版面估計與卡片建置會問它）。
+     讀它不等於要畫它 —— 生成只在卡片進視野時發生（見 _xcalFile / loadXcalThumb）。 */
+  Object.defineProperty(it, 'xcal', {
+    enumerable: false,
+    configurable: true,
+    get() {
+      const v = isXcalFile(app, f);
+      Object.defineProperty(it, 'xcal', { value: v, writable: true, enumerable: false, configurable: true });
+      return v;
     },
   });
   return it;
@@ -2537,6 +2681,114 @@ class GalleryView extends ItemView {
     finally { try { if (doc) doc.destroy(); } catch (e) {} }
   }
 
+  /* Excalidraw 縮圖：結構與 loadPdfThumb 一模一樣——
+       • 快取命中（同檔同 mtime）直接 put，失敗過（null）就不重試
+       • 生成排 TaskGate（LIFO／換頁丟單），被丟的卡片放回觀察佇列
+       • put() 之前一律先確認卡片還在文件裡；任何一條「不會有圖了」的出口都要
+         dropLateFlag()，否則卡片永遠停在未定案狀態（見 cardSettled）
+     不套 autoTintCard：與 PDF 縮圖一致（那是封面圖才有的待遇）。 */
+  async loadXcalThumb(file, card, placeholder) {
+    if (!card.isConnected) return;
+    const cache = this.plugin._xcalThumbCache || (this.plugin._xcalThumbCache = new Map());
+    const key = file.path + ':' + file.stat.mtime;
+    const put = (src) => {
+      if (!src || !card.isConnected) return;
+      /* 存檔重生成（refreshXcalCards）時舊圖還在 DOM 上：先記著、新圖掛上去再移除，
+         中間不留「沒圖的矮高度」——那會讓 masonry 量到一次錯的高度。 */
+      const stale = card.querySelector('img.gn-xcal-thumb');
+      const img = card.createEl('img');
+      /* 長寬比記在 'xcal:<路徑>'：第二次起卡片先按正確比例佔高度，圖進來才不會
+         把整面牆推倒重排（同 PDF 的教訓，見 lateDimKeyOf 上方說明）。
+         ⚠️ 要在設 src 之前掛，applyDim 的 load 監聽才接得到。 */
+      this.applyDim(img, 'xcal:' + file.path);
+      img.loading = 'lazy';
+      img.decoding = 'async';
+      img.src = src;
+      img.addClass('gn-xcal-thumb');
+      card.appendChild(img);                  // 滿版圖片（版型由 CSS 負責）
+      if (stale) stale.remove();              // 換新圖：舊的那張此時才放手
+      card.addClass('gn-has-img');
+      card.removeClass('gn-icon-cover');      // 傳統 .excalidraw 走圖示封面卡 → 換真圖
+      if (placeholder) placeholder.remove();  // ⚠️ 不刪圖示會和縮圖疊在一起
+      card._lateImg = false;
+      this.relayoutWalls(card);
+    };
+    const dropLateFlag = () => { if (card._lateImg) { card._lateImg = false; this.relayoutWalls(card); } };
+    if (cache.has(key)) { const d = cache.get(key); if (d) put(d); else dropLateFlag(); return; }
+    const src = await this.plugin.xcalGate.run(key, () => this.renderXcalThumb(file, cache, key));
+    if (src === GATE_DROPPED) { this.requeueLazy(card, '_xcalFile', file); return; }
+    if (src && card.isConnected) put(src);
+    else dropLateFlag();
+  }
+
+  /** 實際產生縮圖（受 xcalGate 併發管制，結果進 _xcalThumbCache；含負記錄 null）
+      三條出口見檔案上方「Excalidraw 縮圖」註解：兄弟匯出檔 → EA 渲染 → null。 */
+  async renderXcalThumb(file, cache, key) {
+    const app = this.app;
+    const save = (v) => {
+      while (cache.size >= XCAL_THUMB_MAX) {
+        const oldest = cache.keys().next().value;
+        if (oldest === undefined) break;
+        cache.delete(oldest);
+      }
+      cache.set(key, v);
+      return v;
+    };
+    const plugin = getXcalPlugin(app);
+    if (!plugin) return save(null);                       // 外掛沒裝／沒開：靜默退回
+    /* ⚠️ 一定要先確認檔案還在：getTemplate() 解析不到路徑時**不會**報錯，
+       它回傳 null → elements 變空場景 → 匯出一張全白 SVG（不是 null）。
+       刪除／改名和渲染排隊之間有競態，少了這道判斷卡片會收到一張空白縮圖。 */
+    if (!(app.vault.getAbstractFileByPath(file.path) instanceof TFile)) return save(null);
+    try {
+      const sib = xcalSibling(app, file, plugin);
+      if (sib) return save(sib);                          // ① 自動匯出的兄弟檔：零渲染
+      const ea = xcalEA(plugin);
+      if (!ea) return save(null);
+      if (typeof plugin.awaitInit === 'function') await plugin.awaitInit();   // 字型就緒才有正確文字度量
+      const st = plugin.settings || {};
+      const exportSettings = {
+        withBackground: !!st.exportWithBackground,
+        withTheme: true,                                  // 圖色跟著 theme（同 EA 自己的預設值）
+        isMask: false,
+        skipInliningFonts: false,                         // 內嵌手繪字，見 xcalRasterPng
+        drawingThumbnail: true,                           // 「繪圖縮圖」Frame；舊版多這一個 key 會被忽略
+      };
+      let svg = null;
+      try {
+        svg = await ea.createSVG(file.path, true, exportSettings);
+      } catch (e) {
+        try { svg = await ea.createSVG(file.path); } catch (e2) { svg = null; }   // 簽名對不上時退回最簡呼叫
+      }
+      if (!svg || !svg.outerHTML) return save(null);
+      const svgStr = svg.outerHTML;
+      const size = xcalSvgSize(svg);
+      const svgUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgStr);
+      const png = await xcalRasterPng(svgUrl, size.w, size.h, XCAL_THUMB_W);
+      if (png) return save(png);
+      /* 柵格化失敗才退回直接放 SVG：<img> 顯示 SVG 沒問題，但那份字串會常駐在快取裡。
+         內嵌字體＋內嵌圖片的 SVG 輕易就幾 MB，40 張就是幾百 MB——超過門檻寧可留文字卡。 */
+      if (svgUrl.length > XCAL_SVG_MAX) return save(null);
+      return save(svgUrl);
+    } catch (e) { return save(null); }
+  }
+
+  /** Excalidraw 繪圖存檔 → 重排已掛載的卡片（由 plugin.xcalFileChanged 呼叫）。
+      ⚠️ 不走 refreshViews()：那會重畫整面牆（丟捲動位置、已量測高度全部作廢），
+         為一張卡不划算。交給觀察器觸發 → 只有還在視野內的卡會重生成，
+         捲走的那張等它下次進視野再說。
+        舊圖先留著：新圖到位後由 put() 換掉，中間不會閃成一張短卡。 */
+  refreshXcalCards(file) {
+    if (!this._ogObserver) return;
+    const els = this._cardEls && this._cardEls.get(file.path);
+    if (!els || !els.length) return;
+    for (const card of els) {
+      if (!card.isConnected) continue;
+      card._xcalFile = file;
+      try { this._ogObserver.observe(card); } catch (e) {}
+    }
+  }
+
   /* 用長寬比索引先佔好圖片高度，並在真的載入後回填 / 校正索引。
      沒有這一步的話：img 只有 width:100%、height:auto，載入前高度是 0，
      載入後才撐開 → 每張圖都改變卡片高度 → 每張圖都觸發一次 O(全部卡片) 的重排。
@@ -2565,6 +2817,7 @@ class GalleryView extends ItemView {
 
   /* 「現在沒有封面、但之後會長出圖」的卡片，其圖片長寬比記在這個 key 底下：
        • PDF   → 'pdf:<路徑>'（第一頁縮圖，runtime 渲染完才記得起來）
+       • 繪圖  → 'xcal:<路徑>'（Excalidraw 縮圖，同上）
        • 其他  → 'og:<路徑>'（外部連結的 og:image，下載完才記得起來）
      這類卡片以前一律被估成 180px，圖一進來高度就暴增（實測中位數 200px、
      最高 650px）→ 遠超過虛擬牆的 6px 容差 → 整面牆重排、下方卡片跳位。
@@ -2572,7 +2825,9 @@ class GalleryView extends ItemView {
   lateDimKeyOf(it) {
     const p = this.dimKeyOf(it);
     if (!p) return '';
-    return (it && it.ext === 'pdf' ? 'pdf:' : 'og:') + p;
+    if (it && it.ext === 'pdf') return 'pdf:' + p;
+    if (it && it.xcal) return 'xcal:' + p;    // Excalidraw 繪圖（.excalidraw.md 也是 md，看旗標）
+    return 'og:' + p;
   }
 
   /* 決定卡片圖片實際要載入哪一個檔案：縮圖優先，原圖是退路。
@@ -4872,6 +5127,7 @@ class GalleryView extends ItemView {
     if (this.plugin.thumbs) this.plugin.thumbs.dropPending();
     if (this.plugin.ogGate) this.plugin.ogGate.dropPending();
     if (this.plugin.pdfGate) this.plugin.pdfGate.dropPending();
+    if (this.plugin.xcalGate) this.plugin.xcalGate.dropPending();
 
     // 多選狀態：換頁重置
     this.selected.clear();
@@ -4892,6 +5148,7 @@ class GalleryView extends ItemView {
         if (card._prevFile && card._prevEl) { this.loadPreview(card._prevFile, card._prevEl); card._prevFile = null; }
         if (card._ogFile) { this.loadLinkPreview(card._ogFile, card); card._ogFile = null; }
         if (card._pdfFile) { this.loadPdfThumb(card._pdfFile, card, card._pdfPh); card._pdfFile = null; }
+        if (card._xcalFile) { this.loadXcalThumb(card._xcalFile, card, card._xcalPh); card._xcalFile = null; }
       }
     }, { rootMargin: '400px' });
   }
@@ -5109,7 +5366,25 @@ class GalleryView extends ItemView {
         card._pdfFile = it.file; card._pdfPh = ph;
         // 高度已按縮圖的長寬比估 → 縮圖進來前先別量（見 cardSettled）
         if ((this.plugin._dimIndex || {})[this.lateDimKeyOf(it)]) card._lateImg = true;
+      } else if (it.xcal && this.plugin.state.excalidrawThumbs !== false) {
+        /* 傳統 .excalidraw（JSON 檔）：和 PDF 同形——圖示當臨時封面，捲進視野再換真圖。
+           ph 要留給 loadXcalThumb 刪掉，否則圖示方塊會和縮圖疊在一起。 */
+        card._xcalFile = it.file; card._xcalPh = ph;
+        if ((this.plugin._dimIndex || {})[this.lateDimKeyOf(it)]) card._lateImg = true;
       }
+    } else if (it.xcal && this.plugin.state.excalidrawThumbs !== false) {
+      /* .excalidraw.md（現行格式）走的是 md 分支，這裡要特意岔開，因為預設那條路
+         對繪圖檔全是干擾、沒有幫助：
+         • 不抓 og:image：firstExternalUrl 對全文跑 regex，繪圖 JSON 裡的
+           "link":"https://…" 必然命中 → 抓來的是「被連結的那個網站」的圖，
+           而且 loadLinkPreview 是 appendChild → 可能和繪圖縮圖同卡並存。
+         • 不建內文預覽：extractPreview 不排程式碼區塊，預覽會是 Excalidraw 的
+           JSON／Text Elements 殘片；更糟的是空的 .gn-preview 讓 cardSettled()
+           永遠判定未定案，虛擬牆不肯量這張卡。
+         有 frontmatter cover 的繪圖檔在上面 it.src 分支就處理掉了（使用者自己
+         指定封面 → 照他的，這裡不搶）。 */
+      card._xcalFile = it.file;
+      if ((this.plugin._dimIndex || {})[this.lateDimKeyOf(it)]) card._lateImg = true;
     } else {
       // md 無封面 → 顯示內文預覽；同時試抓外部連結 og:image，抓到則以圖代文
       if (!skipPreview) {
@@ -5227,8 +5502,8 @@ class GalleryView extends ItemView {
       return menu;
     });
 
-    // 有延遲工作（內文預覽 / 連結圖 / PDF 縮圖）→ 掛觀察器，捲到附近才載入
-    if (card._prevFile || card._ogFile || card._pdfFile) this._ogObserver.observe(card);
+    // 有延遲工作（內文預覽 / 連結圖 / PDF 縮圖 / Excalidraw 縮圖）→ 掛觀察器，捲到附近才載入
+    if (card._prevFile || card._ogFile || card._pdfFile || card._xcalFile) this._ogObserver.observe(card);
 
     // masonry 為 null＝虛擬化模式：位置與寬度由 VirtualWall 統一寫，這裡只設定位方式
     if (masonry) masonry.add(card);
@@ -5680,6 +5955,12 @@ class GallerySettingTab extends PluginSettingTab {
       .setDesc(t('Tints each card with the dominant color of its cover image. Cards you colored manually are left alone.'))
       .addToggle((tg) => tg.setValue(!!st.autoCardColor)
         .onChange((v) => { st.autoCardColor = v; save(); this.plugin.refreshViews(); }));
+
+    new Setting(containerEl)
+      .setName(t('Excalidraw thumbnails'))
+      .setDesc(t('Renders each Excalidraw drawing into its card through the Excalidraw plugin, in the background, and only for cards on screen. With the plugin off, drawings stay plain text cards.'))
+      .addToggle((tg) => tg.setValue(st.excalidrawThumbs !== false)
+        .onChange((v) => { st.excalidrawThumbs = v; save(); this.plugin.refreshViews(); }));
 
     new Setting(containerEl)
       .setName(t('Open notes without focusing the editor'))
@@ -6326,7 +6607,7 @@ class GalleryPlugin extends Plugin {
        本機那份優先；升級後第一次執行還沒有 → 沿用 data.json 裡的（以前都存在那裡）。 */
     const disk = (await this.loadData()) || {};
     const localSaved = this.loadLocalState();
-    this.state = Object.assign({ lastPath: '', cardWidth: 120, sort: 'new', folderOrder: {}, hiddenFolders: [], folderColors: {}, expandedFolders: [], treeWidth: 232, treeCollapsed: false, syncActive: true, leftMode: 'folder', activeTag: '', expandedTags: [], cardColors: {}, noPreviewFolders: [], folderLayouts: {}, favorites: [], pinnedCards: [], lang: '', openUnfocused: true, imageCardLayout: 'stacked', autoCardColor: false }, disk, localSaved ? splitState(localSaved).local : null);
+    this.state = Object.assign({ lastPath: '', cardWidth: 120, sort: 'new', folderOrder: {}, hiddenFolders: [], folderColors: {}, expandedFolders: [], treeWidth: 232, treeCollapsed: false, syncActive: true, leftMode: 'folder', activeTag: '', expandedTags: [], cardColors: {}, noPreviewFolders: [], folderLayouts: {}, favorites: [], pinnedCards: [], lang: '', openUnfocused: true, imageCardLayout: 'stacked', autoCardColor: false, excalidrawThumbs: true }, disk, localSaved ? splitState(localSaved).local : null);
     // 三方合併的基準：上次看到的磁碟內容（只含共用設定）
     this._syncBase = splitState(disk).shared;
 
@@ -6383,7 +6664,10 @@ class GalleryPlugin extends Plugin {
     this.search = new GnSearchIndex(this.app);
 
     // 增量更新：改一篇只重索引那一篇（幾 ms），索引全程保持新鮮
-    this.registerEvent(this.app.vault.on('modify', (f) => this.search.onFileModified(f)));
+    this.registerEvent(this.app.vault.on('modify', (f) => {
+      this.search.onFileModified(f);
+      this.xcalFileChanged(f);
+    }));
     // 'create' 延到 layout ready 後註冊：啟動期每個既有檔案都會發一次
     this.app.workspace.onLayoutReady(() => {
       this.registerEvent(this.app.vault.on('create', (f) => this.search.onFileChanged(f)));
@@ -6438,6 +6722,7 @@ class GalleryPlugin extends Plugin {
     const isMobileUI = document.body.classList.contains('is-mobile');
     this.ogGate = new TaskGate(isMobileUI ? 2 : 3);    // 網路 I/O 為主
     this.pdfGate = new TaskGate(isMobileUI ? 1 : 2);   // readBinary + pdfjs 解碼，最吃記憶體
+    this.xcalGate = new TaskGate(isMobileUI ? 1 : 2);  // Excalidraw 匯出：讀檔+SVG+柵格化，同樣吃 CPU/記憶體
 
     // 長寬比預取：開資料夾時在背景把整批的長寬比補齊，總高度才能一次算準（見 dims.js）
     this.dimPrefetch = new DimPrefetcher(this);
@@ -7267,15 +7552,23 @@ class GalleryPlugin extends Plugin {
         } catch (e) {}
       }
     }
-    /* 長寬比索引有三種 key，全部都要清：
-         '<路徑>'      vault 圖片本身
-         'og:<路徑>'   該筆記的 og:image
-         'pdf:<路徑>'  該 PDF 的第一頁縮圖  */
+    /* 長寬比索引有四種 key，全部都要清：
+         '<路徑>'       vault 圖片本身
+         'og:<路徑>'    該筆記的 og:image
+         'pdf:<路徑>'   該 PDF 的第一頁縮圖
+         'xcal:<路徑>'  該 Excalidraw 繪圖的縮圖  */
     const dim = this._dimIndex;
     if (dim) {
       const keys = DIM_KEY_PREFIXES.flatMap((pre) => this._pathsUnder(dim, path, pre));
       for (const k of keys) delete dim[k];
       if (keys.length) this.saveDimIndex();
+    }
+    /* Excalidraw 縮圖快取：記憶體裡的 Map，key = '<路徑>:<mtime>'。
+       （檔案系統沒有對應產物——dataURL 只存在這一層，所以跟著檔案消失就好。） */
+    if (this._xcalThumbCache) {
+      for (const k of Array.from(this._xcalThumbCache.keys())) {
+        if (k.startsWith(path + ':') || k.startsWith(path + '/')) this._xcalThumbCache.delete(k);
+      }
     }
     // 卡片高度索引（key 就是筆記路徑，同樣要含子路徑）
     const ch = this._cardH;
@@ -7283,6 +7576,43 @@ class GalleryPlugin extends Plugin {
       const keys = this._pathsUnder(ch, path, '');
       for (const k of keys) delete ch[k];
       if (keys.length) this.saveCardHeights();
+    }
+  }
+
+  /* Excalidraw 繪圖存檔（vault 'modify'）→ 縮圖要跟著換。
+     做三件事：① 清掉該路徑的快取（舊 mtime 那筆永遠不會再被命中，留著只是佔位）
+     ② 清封面快取（繪圖檔的 src 一律是 null，但 coverFor 記的是 mtime，
+        不清的話下次估高度會拿舊紀錄比對不上、白算一次）
+     ③ 請各視圖把「還掛在牆上」的卡片重排（看不見的卡等捲到再說）。
+     ⚠️ 不動整面牆：refreshViews() 會重畫全部卡片、丟捲動位置，為一張卡不划算。 */
+  xcalFileChanged(f) {
+    if (!f || this.state.excalidrawThumbs === false) return;   // 開關關掉 → 完全不插手
+    if (!isXcalFile(this.app, f)) return;
+    invalidateCoverCache(f.path);
+    /* Excalidraw 是「邊畫邊存檔」的（自動存檔很頻繁），連打存檔會一檔案一次匯出。
+       合併成一次：600ms 內的連續存檔只刷一次，正在編輯時也不會一直吃 CPU。 */
+    const pend = this._xcalPend || (this._xcalPend = new Map());
+    pend.set(f.path, f);
+    clearTimeout(this._xcalPendT);
+    this._xcalPendT = setTimeout(() => this._flushXcalPending(), 600);
+  }
+
+  _flushXcalPending() {
+    const pend = this._xcalPend;
+    if (!pend || !pend.size) return;
+    const files = Array.from(pend.values());
+    pend.clear();
+    const c = this._xcalThumbCache;
+    const views = [];
+    this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => {
+      if (leaf.view instanceof GalleryView) views.push(leaf.view);
+    });
+    for (const f of files) {
+      if (c) {
+        const pre = f.path + ':';
+        for (const k of Array.from(c.keys())) if (k.startsWith(pre)) c.delete(k);
+      }
+      for (const v of views) v.refreshXcalCards(f);
     }
   }
 
@@ -7301,9 +7631,20 @@ class GalleryPlugin extends Plugin {
     };
     if (this._ogIndex && swap(this._ogIndex, '')) this.saveOgIndex();
     const dim = this._dimIndex;
-    // 三種前綴都要搬（用 reduce 而非 || ，每一種都必須執行，不能短路）
+    // 四種前綴都要搬（用 reduce 而非 || ，每一種都必須執行，不能短路）
     if (dim && DIM_KEY_PREFIXES.reduce((n, pre) => n + swap(dim, pre), 0)) this.saveDimIndex();
     if (this._cardH && swap(this._cardH, '')) this.saveCardHeights();
+    /* Excalidraw 縮圖快取：key 是 '<路徑>:<mtime>'，改名不改 mtime → 直接換頭，
+       搬得動就省掉一次重新渲染（搬不動乾脆留舊鍵，頂多多渲一次，不影響正確性）。 */
+    const xc = this._xcalThumbCache;
+    if (xc) {
+      for (const k of Array.from(xc.keys())) {
+        // ':' 或 '/' 當界線：'AB/x.md:1' 不是 'A' 的子路徑，不能誤搬
+        if (!k.startsWith(oldPath + ':') && !k.startsWith(oldPath + '/')) continue;
+        xc.set(newPath + k.slice(oldPath.length), xc.get(k));
+        xc.delete(k);
+      }
+    }
   }
 
   /* og-cache 裡沒有任何索引項引用的圖檔＝孤兒，清掉。

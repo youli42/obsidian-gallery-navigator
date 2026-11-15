@@ -24,6 +24,7 @@ Interface available in **English**, **繁體中文** and **简体中文** (follo
 ### Card wall
 - True JS masonry layout with lazy, chunked rendering (handles folders with thousands of files, mobile-friendly)
 - Covers from `cover:` frontmatter, first embedded image, image files themselves, PDF first pages, and web page `og:image` for link notes
+- Excalidraw drawings render as thumbnails of the drawing itself (rendered in the background through the Excalidraw plugin; only for cards on screen)
 - Pin cards to top, per-card background colors, multi-select with batch move / delete (optionally removing orphaned attachments) / copy-wiki-links
 - Canvas and Base files render as cards too (Canvas uses its first embedded image as the cover when available)
 
