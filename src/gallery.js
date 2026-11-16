@@ -9,7 +9,8 @@
 const { Plugin, ItemView, MarkdownView, TFolder, TFile, Menu, FuzzySuggestModal, SuggestModal, Notice, setIcon, addIcon, getIconIds, Modal, requestUrl, PluginSettingTab, Setting, loadPdfJs } = require('obsidian');
 const { t, setLang, isZh } = require('./i18n.js');
 const { ThumbCache } = require('./thumbs.js');
-const { XcalCache, DEFAULT_MB_DESKTOP, DEFAULT_MB_MOBILE, MIN_MB, MAX_MB } = require('./xcalcache.js');
+const { CoverCache, DEFAULT_MB_DESKTOP, DEFAULT_MB_MOBILE, MIN_MB, MAX_MB } = require('./covercache.js');
+const { VIDEO_EXT, videoSiblingCover, shouldGrabVideoFrame, grabVideoFrame } = require('./videocover.js');
 const { DimPrefetcher } = require('./dims.js');
 const { setupCanvasImageToNote } = require('./canvasnote.js');
 const { VirtualWall } = require('./virtual.js');
@@ -28,9 +29,9 @@ const OG_FAIL_TTL = 15 * 60 * 1000;
 const OG_MAX_IMAGE_BYTES = 300 * 1024;
 const OG_DOWNSCALE_WIDTH = 640;
 
-/* 長寬比索引裡，同一個筆記／檔案路徑可能對應三種 key。
-   刪除／改名時三種都要一起清或搬，少一種就會留下永遠回收不掉的孤兒。 */
-const DIM_KEY_PREFIXES = ['', 'og:', 'pdf:', 'xcal:'];
+/* 長寬比索引裡，同一個筆記／檔案路徑可能對應多種 key（見 DIM_KEY_PREFIXES）。
+   刪除／改名時每一種都要一起清或搬，少一種就會留下永遠回收不掉的孤兒。 */
+const DIM_KEY_PREFIXES = ['', 'og:', 'pdf:', 'xcal:', 'video:'];
 
 /* 外掛專屬圖示（2026-07-20）：三個互扣的圓角方塊＝卡片牆意象。
    ⚠️ addIcon() 的內容必須適配 0 0 100 100 的 viewBox，但原稿是 24×24
@@ -613,12 +614,15 @@ const _coverCache = new Map();   // path → { mtime, src }
 function invalidateCoverCache(path) {
   if (path) _coverCache.delete(path); else _coverCache.clear();
 }
-function coverFor(app, f, isImg) {
+function coverFor(app, f, isImg, isVideo) {
   const hit = _coverCache.get(f.path);
   if (hit && hit.mtime === f.stat.mtime) return hit.src;
+  /* 圖片檔本身即封面；影片找同目錄的同名封面圖（見 videocover.js）；其餘只有 md 有封面。 */
   const src = isImg
     ? app.vault.getResourcePath(f)
-    : coverSrc(app, app.metadataCache.getFileCache(f), f.path);
+    : isVideo
+      ? videoSiblingCover(app, f)
+      : coverSrc(app, app.metadataCache.getFileCache(f), f.path);
   if (_coverCache.size > 20000) _coverCache.clear();   // 上限防呆，成本只是重算一次
   _coverCache.set(f.path, { mtime: f.stat.mtime, src });
   return src;
@@ -648,8 +652,9 @@ function coverFor(app, f, isImg) {
       掛在 src 上 = 開一個 200 張繪圖的資料夾，首幀就排 200 次匯出。
       改為沿用 PDF 那套：卡片捲進視野（_ogObserver）才生。 */
 /* 記憶體快取（2026-11-16）：值從 dataURL 變成「資源路徑」這種短字串，
-   大圖本体在 xcal-cache/ 磁碟上。所以這裡留筆數上限就好，位元組預算在磁碟那層管
-   （見 xcalcache.js）。原本 40 筆是為了壓 dataURL 的記憶體，現在不需要那麼緊。 */
+   大圖本体在 cover-cache/ 磁碟上（與影片首幀共用，見 covercache.js）。
+   所以這裡留筆數上限就好，位元組預算在磁碟那層管。
+   原本 40 筆是為了壓 dataURL 的記憶體，現在不需要那麼緊。 */
 const XCAL_THUMB_MAX = 500;   // 常駐「路徑 → 資源路徑」對應表的筆數上限
 /* 柵格化目標寬（2026-11-16：800 → 480）。
    卡片最寬約 400 CSS px，480 已足夠高 DPI 使用；面積從 800 降到 480 只剩 36%，
@@ -781,21 +786,26 @@ function blobToDataURL(blob) {
 
 function itemFromFile(app, f) {
   const isImg = IMG_EXT.test(f.path);
+  /* 影片：卡片牆要對它做兩件額外的事——找同名封面圖（coverFor）與抽首幀當封面
+     （卡片進視野才做，見 loadVideoCover）。這裡只是一個便宜的副檔名判斷。 */
+  const isVideo = VIDEO_EXT.test(f.path);
   const it = {
     file: f,
     name: f.basename,
     ext: (f.extension || '').toLowerCase(),
     isImg,
+    isVideo,
     ctime: f.stat.ctime,
     mtime: f.stat.mtime,
   };
   /* src（封面）惰性求值：被標籤篩選掉、或根本沒進到可視範圍的項目完全不用算。
-     圖片檔本身即封面（免讀 cache）；md 才讀 frontmatter/內文封面；其他檔型無封面。 */
+     圖片檔本身即封面（免讀 cache）；md 才讀 frontmatter/內文封面；
+     影片只找同目錄的同名封面圖（抽首幀是延遲工作，見 loadVideoCover）；其他檔型無封面。 */
   Object.defineProperty(it, 'src', {
     enumerable: true,
     configurable: true,
     get() {
-      const v = coverFor(app, f, isImg);
+      const v = coverFor(app, f, isImg, isVideo);
       // 求過一次就把 getter 換成一般欄位，之後連 Map 查詢都省
       Object.defineProperty(it, 'src', { value: v, writable: true, enumerable: true, configurable: true });
       return v;
@@ -2863,10 +2873,10 @@ class GalleryView extends ItemView {
     /* 磁碟快取命中（2026-11-16）：連閘門都不用進。
        成本只剩「讀檔 + 瀏覽器解碼」，比重新匯出便宜一個數量級（匯出 58ms 中位數）。
        mtime 不符時 urlFor 自己回 null → 落到下面的重新生成。 */
-    if (this.plugin.xcalCache) {
+    if (this.plugin.coverCache) {
       try {
-        await this.plugin.xcalCache.ensure();
-        const url = this.plugin.xcalCache.urlFor(file);
+        await this.plugin.coverCache.ensure();
+        const url = this.plugin.coverCache.urlFor(file);
         if (url) { cache.set(key, url); put(url); return; }
       } catch (e) {}
     }
@@ -2922,7 +2932,7 @@ class GalleryView extends ItemView {
       /* 先落盤、再進記憶體（2026-11-16）。順序不能反：
          落盤成功的話記憶體只留一個短資源路徑；反過來就會先把幾百 KB 的 dataURL
          塞進 Map，等寫盤完才丟掉，白做一次搬運。 */
-      const xc = this.plugin.xcalCache;
+      const xc = this.plugin.coverCache;
       const png = await xcalRasterPng(svgUrl, size.w, size.h, XCAL_THUMB_W);
       if (png) {
         try {
@@ -2948,6 +2958,93 @@ class GalleryView extends ItemView {
       } catch (e) {}
       return save(svgUrl);
     } catch (e) { return save(null); }
+  }
+
+  /* 影片檔被替換（vault 'modify'）→ 封面要重抽，重排已掛載的卡。
+     與 refreshXcalCards 同形：不動整面牆，只看還在視野內的那幾張。 */
+  refreshVideoCards(file) {
+    if (!this._ogObserver) return;
+    const els = this._cardEls && this._cardEls.get(file.path);
+    if (!els || !els.length) return;
+    for (const card of els) {
+      if (!card.isConnected) continue;
+      card._videoFile = file;
+      try { this._ogObserver.observe(card); } catch (e) {}
+    }
+  }
+
+  /* 影片封面：結構與 loadXcalThumb 相同，差別只有「圖從哪裡來」。三條出口由便宜到貴：
+       1. 同名封面圖（clip.mp4 + clip.jpg）→ it.src 已經有值，走一般圖片卡，不會到這裡
+       2. 磁碟封面快取 cover-cache/（與 Excalidraw 縮圖**共用同一份配額**）
+       3. 抽首幀（videocover.js：readBinary → Blob → <video> → canvas → JPEG）
+     抽完寫回 cover-cache/，第二次進同一個資料夾就是讀檔，零解碼。
+     ⚠️ 快取寫不進去（配額滿、寫檔失敗）就維持圖示卡，**不**退回內嵌 dataURL：
+        那等於繞過共用配額，幾十張卡就能吃掉幾 MB 常駐記憶體。 */
+  async loadVideoCover(file, card, placeholder) {
+    if (!card.isConnected) return;
+    const cache = this.plugin._videoCoverCache || (this.plugin._videoCoverCache = new Map());
+    const key = file.path + ':' + file.stat.mtime;
+    const put = (src) => {
+      if (!src || !card.isConnected) return;
+      /* 換檔重抽時舊圖先留著，新圖掛上去才移除（同 loadXcalThumb）：
+         中間不留「沒圖的矮高度」，masonry 才不會量到一次錯的高度。 */
+      const stale = card.querySelector('img.gn-video-thumb');
+      const img = card.createEl('img');
+      /* 長寬比記在 'video:<路徑>'：第二次起卡片先按正確比例佔高度（見 lateDimKeyOf）。
+         ⚠️ 要在設 src 之前掛，applyDim 的 load 監聽才接得到。 */
+      this.applyDim(img, 'video:' + file.path);
+      img.loading = 'lazy';
+      img.decoding = 'async';
+      img.src = src;
+      img.addClass('gn-video-thumb');
+      card.appendChild(img);                 // 滿版圖片（版型由 CSS 負責）
+      if (stale) stale.remove();
+      card.addClass('gn-has-img');
+      card.removeClass('gn-icon-cover');     // 換成真圖 → 文字改回疊圖模式
+      if (placeholder) placeholder.remove(); // ⚠️ 不刪圖示會和封面疊在一起
+      card._lateImg = false;
+      this.relayoutWalls(card);
+    };
+    const dropLateFlag = () => { if (card._lateImg) { card._lateImg = false; this.relayoutWalls(card); } };
+    if (cache.has(key)) { const d = cache.get(key); if (d) put(d); else dropLateFlag(); return; }
+    /* 磁碟快取命中：連閘門都不用進，成本只剩讀檔 + 瀏覽器解碼。 */
+    if (this.plugin.coverCache) {
+      try {
+        await this.plugin.coverCache.ensure();
+        const url = this.plugin.coverCache.urlFor(file);
+        if (url) { cache.set(key, url); put(url); return; }
+      } catch (e) {}
+    }
+    const res = await this.plugin.videoGate.run(key, () => this.renderVideoCover(file, cache, key));
+    if (res === GATE_DROPPED) { this.requeueLazy(card, '_videoFile', file); return; }
+    if (res && card.isConnected) put(res);
+    else dropLateFlag();
+  }
+
+  /** 實際抽首幀 + 寫進共用封面快取（受 videoGate 併發管制；含負記錄 null） */
+  async renderVideoCover(file, cache, key) {
+    const VIDEO_COVER_MAX = 400;   // 常駐「路徑 → 資源路徑」對應表的筆數上限（大圖在磁碟）
+    const save = (v) => {
+      while (cache.size >= VIDEO_COVER_MAX) {
+        const oldest = cache.keys().next().value;
+        if (oldest === undefined) break;
+        cache.delete(oldest);
+      }
+      cache.set(key, v);
+      return v;
+    };
+    /* 排隊期間可能已經被刪掉／改名 → 抽了也是白抽（而且會拖住閘門）。 */
+    if (!(this.app.vault.getAbstractFileByPath(file.path) instanceof TFile)) return save(null);
+    let frame = null;
+    try { frame = await grabVideoFrame(this.app, file); } catch (e) { frame = null; }
+    if (!frame || !frame.bytes || !frame.bytes.byteLength) return save(null);   // 解碼失敗：本階段不再重試
+    let url = null;
+    if (this.plugin.coverCache) {
+      try { url = await this.plugin.coverCache.set(file, frame.bytes, 'jpg'); } catch (e) { url = null; }
+    }
+    /* 寫不進去就不記負快取：下次進視野再試（配額可能已經鬆一點了）。
+       成功才記住資源路徑。 */
+    return url ? save(url) : null;
   }
 
   /** Excalidraw 繪圖存檔 → 重排已掛載的卡片（由 plugin.xcalFileChanged 呼叫）。
@@ -2994,6 +3091,7 @@ class GalleryView extends ItemView {
 
   /* 「現在沒有封面、但之後會長出圖」的卡片，其圖片長寬比記在這個 key 底下：
        • PDF   → 'pdf:<路徑>'（第一頁縮圖，runtime 渲染完才記得起來）
+       • 影片  → 'video:<路徑>'（首幀封面，抽幀完才記得起來）
        • 繪圖  → 'xcal:<路徑>'（Excalidraw 縮圖，同上）
        • 其他  → 'og:<路徑>'（外部連結的 og:image，下載完才記得起來）
      這類卡片以前一律被估成 180px，圖一進來高度就暴增（實測中位數 200px、
@@ -3003,6 +3101,7 @@ class GalleryView extends ItemView {
     const p = this.dimKeyOf(it);
     if (!p) return '';
     if (it && it.ext === 'pdf') return 'pdf:' + p;
+    if (it && it.isVideo) return 'video:' + p;   // 影片首幀（抽完才記得起來）
     if (it && it.xcal) return 'xcal:' + p;    // Excalidraw 繪圖（.excalidraw.md 也是 md，看旗標）
     return 'og:' + p;
   }
@@ -5351,6 +5450,7 @@ class GalleryView extends ItemView {
     if (this.plugin.thumbs) this.plugin.thumbs.dropPending();
     if (this.plugin.ogGate) this.plugin.ogGate.dropPending();
     if (this.plugin.pdfGate) this.plugin.pdfGate.dropPending();
+    if (this.plugin.videoGate) this.plugin.videoGate.dropPending();
     if (this.plugin.xcalGate) this.plugin.xcalGate.dropPending();
 
     // 多選狀態：換頁重置
@@ -5372,6 +5472,7 @@ class GalleryView extends ItemView {
         if (card._prevFile && card._prevEl) { this.loadPreview(card._prevFile, card._prevEl); card._prevFile = null; }
         if (card._ogFile) { this.loadLinkPreview(card._ogFile, card); card._ogFile = null; }
         if (card._pdfFile) { this.loadPdfThumb(card._pdfFile, card, card._pdfPh); card._pdfFile = null; }
+        if (card._videoFile) { this.loadVideoCover(card._videoFile, card, card._videoPh); card._videoFile = null; }
         if (card._xcalFile) { this.loadXcalThumb(card._xcalFile, card, card._xcalPh); card._xcalFile = null; }
       }
     }, { rootMargin: '400px' });
@@ -5602,6 +5703,12 @@ class GalleryView extends ItemView {
         card._pdfFile = it.file; card._pdfPh = ph;
         // 高度已按縮圖的長寬比估 → 縮圖進來前先別量（見 cardSettled）
         if ((this.plugin._dimIndex || {})[this.lateDimKeyOf(it)]) card._lateImg = true;
+      } else if (it.isVideo && this.plugin.state.videoCovers !== false && shouldGrabVideoFrame(it.file)) {
+        /* 影片：先掛檔型圖示，捲進視野再抽首幀（loadVideoCover）。
+           有同名封面圖的影片在 it.src 分支就處理掉了（使用者自己指定封面 → 照他的）。
+           太大／型別不支援的影片在 shouldGrabVideoFrame 就擋掉，維持圖示卡。 */
+        card._videoFile = it.file; card._videoPh = ph;
+        if ((this.plugin._dimIndex || {})[this.lateDimKeyOf(it)]) card._lateImg = true;
       } else if (it.xcal && this.plugin.state.excalidrawThumbs !== false) {
         /* 傳統 .excalidraw（JSON 檔）：和 PDF 同形——圖示當臨時封面，捲進視野再換真圖。
            ph 要留給 loadXcalThumb 刪掉，否則圖示方塊會和縮圖疊在一起。 */
@@ -5740,8 +5847,8 @@ class GalleryView extends ItemView {
       return menu;
     });
 
-    // 有延遲工作（內文預覽 / 連結圖 / PDF 縮圖 / Excalidraw 縮圖）→ 掛觀察器，捲到附近才載入
-    if (card._prevFile || card._ogFile || card._pdfFile || card._xcalFile) this._ogObserver.observe(card);
+    // 有延遲工作（內文預覽 / 連結圖 / PDF 縮圖 / 影片封面 / Excalidraw 縮圖）→ 掛觀察器，捲到附近才載入
+    if (card._prevFile || card._ogFile || card._pdfFile || card._videoFile || card._xcalFile) this._ogObserver.observe(card);
 
     // masonry 為 null＝虛擬化模式：位置與寬度由 VirtualWall 統一寫，這裡只設定位方式
     if (masonry) masonry.add(card);
@@ -6200,44 +6307,51 @@ class GallerySettingTab extends PluginSettingTab {
       .addToggle((tg) => tg.setValue(st.excalidrawThumbs !== false)
         .onChange((v) => { st.excalidrawThumbs = v; save(); this.plugin.refreshViews(); }));
 
-    /* Excalidraw 縮圖落盤快取（2026-11-16）：縮圖只匯出一次、存在 xcal-cache/，
-       之後進同一個資料夾直接讀檔，不再跑 createSVG。
-       上限是「每台裝置」的位元組預算（磁碟是各自的，不同步到其他裝置）。
-       這裡刻意用位元組而不是張數：實測單張 45KB–1.24MB，張數上限對體積完全沒有保護力。 */
-    const xcache = this.plugin.xcalCache;
+    new Setting(containerEl)
+      .setName(t('Video covers'))
+      .setDesc(t('Video cards show a first-frame cover, or a same-name image next to the file (clip.mp4 + clip.jpg / clip.cover.jpg). Frames are extracted in the background, only for cards on screen, and share the cover cache below. Turn off if folders full of large videos feel slow.'))
+      .addToggle((tg) => tg.setValue(st.videoCovers !== false)
+        .onChange((v) => { st.videoCovers = v; save(); this.plugin.refreshViews(); }));
+
+    /* 縮圖落盤快取（2026-11-16）：Excalidraw 繪圖縮圖與影片首幀**共用同一個池**——
+       都放在 cover-cache/，共用一份位元組預算與 LRU。之後再加別的封面來源
+       （PDF 首頁快照…）也一樣丟這裡，不需要再長一個配額設定。
+       上限是「每台裝置」的預算（磁碟各自獨立，不同步）。
+       用位元組而不是張數：實測單張 30KB–1.24MB，張數上限對體積沒有保護力。 */
+    const ccache = this.plugin.coverCache;
     const fmtBytes = (bytes) => (bytes >= 1024 * 1024
       ? (bytes / 1024 / 1024).toFixed(1) + ' MB'
       : Math.max(0, Math.round(bytes / 1024)) + ' KB');
     const defaultMB = () => (document.body.classList.contains('is-mobile') ? DEFAULT_MB_MOBILE : DEFAULT_MB_DESKTOP);
-    const cacheDesc = (size) => t('Excalidraw drawings are exported once and the image is kept on disk, so revisiting a folder no longer re-exports them. The limit is a per-device budget; least recently used images are removed when it is exceeded. Currently using {{size}}.', { size });
+    const cacheDesc = (size) => t('Drawing thumbnails and video first frames are generated once and kept on disk, so revisiting a folder does not redo them. The limit is a per-device budget; least recently used images are removed when it is exceeded. Currently using {{size}}.', { size });
     const cacheSetting = new Setting(containerEl)
-      .setName(t('Excalidraw thumbnail cache'))
+      .setName(t('Cover cache'))
       .setDesc(cacheDesc('…'))
       .addText((tx) => {
         tx.inputEl.type = 'number';
         tx.inputEl.min = String(MIN_MB);
         tx.inputEl.max = String(MAX_MB);
         tx.setPlaceholder(String(defaultMB()));
-        tx.setValue(String(st.xcalCacheMB || defaultMB()));
+        tx.setValue(String(st.coverCacheMB || defaultMB()));
         tx.onChange((v) => {
           const n = Math.round(Number(v));
-          if (!Number.isFinite(n) || n <= 0) { st.xcalCacheMB = 0; save(); void refreshCacheDesc(); return; }
-          st.xcalCacheMB = Math.min(MAX_MB, Math.max(MIN_MB, n));
+          if (!Number.isFinite(n) || n <= 0) { st.coverCacheMB = 0; save(); void refreshCacheDesc(); return; }
+          st.coverCacheMB = Math.min(MAX_MB, Math.max(MIN_MB, n));
           save();
           /* 調得比目前用量小 → 立刻淘汰一次，不然要等下一張圖進來才收斂。 */
-          void (async () => { if (xcache) await xcache.prune(); await refreshCacheDesc(); })();
+          void (async () => { if (ccache) await ccache.prune(); await refreshCacheDesc(); })();
         });
       })
-      .addButton((b) => b.setButtonText(t('Clear Excalidraw cache')).onClick(async () => {
-        const n = xcache ? await xcache.clearAll() : 0;
+      .addButton((b) => b.setButtonText(t('Clear cover cache')).onClick(async () => {
+        const n = ccache ? await ccache.clearAll() : 0;
         await refreshCacheDesc();
         this.plugin.refreshViews();
-        new Notice(t('Removed {{n}} cached Excalidraw thumbnails', { n }));
+        new Notice(t('Removed {{n}} cover thumbnails', { n }));
       }));
     const refreshCacheDesc = async () => {
-      if (!xcache) return;
-      try { await xcache.ensure(); } catch (e) {}
-      cacheSetting.setDesc(cacheDesc(fmtBytes(xcache.usage())));
+      if (!ccache) return;
+      try { await ccache.ensure(); } catch (e) {}
+      cacheSetting.setDesc(cacheDesc(fmtBytes(ccache.usage())));
     };
     void refreshCacheDesc();
 
@@ -6481,7 +6595,9 @@ class GnSearchModal extends SuggestModal {
     if (f instanceof TFile) {
       const src = IMG_EXT.test(f.path)
         ? this.app.vault.getResourcePath(f)
-        : (f.extension === 'md' ? coverSrc(this.app, this.app.metadataCache.getFileCache(f), f.path) : null);
+        : (f.extension === 'md'
+          ? coverSrc(this.app, this.app.metadataCache.getFileCache(f), f.path)
+          : (VIDEO_EXT.test(f.path) ? videoSiblingCover(this.app, f) : null));   // 影片只認同名封面圖，不抽幀
       if (src) {
         const im = el.createEl('img', { cls: 'gn-search-sug-thumb' });
         im.src = src;
@@ -6905,7 +7021,7 @@ class GalleryPlugin extends Plugin {
        本機那份優先；升級後第一次執行還沒有 → 沿用 data.json 裡的（以前都存在那裡）。 */
     const disk = (await this.loadData()) || {};
     const localSaved = this.loadLocalState();
-    this.state = Object.assign({ lastPath: '', cardWidth: 120, sort: 'new', folderOrder: {}, hiddenFolders: [], folderColors: {}, expandedFolders: [], treeWidth: 232, treeCollapsed: false, syncActive: true, leftMode: 'folder', activeTag: '', expandedTags: [], cardColors: {}, noPreviewFolders: [], folderLayouts: {}, favorites: [], pinnedCards: [], assetTags: {}, lang: '', openUnfocused: true, imageCardLayout: 'stacked', autoCardColor: false, excalidrawThumbs: true, xcalCacheMB: 0 }, disk, localSaved ? splitState(localSaved).local : null);
+    this.state = Object.assign({ lastPath: '', cardWidth: 120, sort: 'new', folderOrder: {}, hiddenFolders: [], folderColors: {}, expandedFolders: [], treeWidth: 232, treeCollapsed: false, syncActive: true, leftMode: 'folder', activeTag: '', expandedTags: [], cardColors: {}, noPreviewFolders: [], folderLayouts: {}, favorites: [], pinnedCards: [], assetTags: {}, lang: '', openUnfocused: true, imageCardLayout: 'stacked', autoCardColor: false, excalidrawThumbs: true, videoCovers: true, coverCacheMB: 0 }, disk, localSaved ? splitState(localSaved).local : null);
     // 三方合併的基準：上次看到的磁碟內容（只含共用設定）
     this._syncBase = splitState(disk).shared;
 
@@ -6965,6 +7081,7 @@ class GalleryPlugin extends Plugin {
     this.registerEvent(this.app.vault.on('modify', (f) => {
       this.search.onFileModified(f);
       this.xcalFileChanged(f);
+      this.videoFileChanged(f);
     }));
     // 'create' 延到 layout ready 後註冊：啟動期每個既有檔案都會發一次
     this.app.workspace.onLayoutReady(() => {
@@ -7015,9 +7132,10 @@ class GalleryPlugin extends Plugin {
     this.thumbs = new ThumbCache(this);
     this.thumbs.load();
 
-    /* Excalidraw 縮圖的落盤快取（2026-11-16）。索引在第一次真的要用時才讀（ensure），
-       不佔啟動時間；預設大小見 xcalcache.js（桌面 200MB／手機 50MB），可在設定頁改。 */
-    this.xcalCache = new XcalCache(this);
+    /* 卡片封面落盤快取（2026-11-16）：Excalidraw 縮圖與影片首幀**共用同一份配額**。
+       索引在第一次真的要用時才讀（ensure），不佔啟動時間；
+       預設大小見 covercache.js（桌面 200MB／手機 50MB），可在設定頁改。 */
+    this.coverCache = new CoverCache(this);
 
     /* og 圖抓取與 PDF 解析的併發閘（見檔案上方 TaskGate）。
        手機記憶體與頻寬都更緊，各降一級。 */
@@ -7025,6 +7143,9 @@ class GalleryPlugin extends Plugin {
     this.ogGate = new TaskGate(isMobileUI ? 2 : 3);    // 網路 I/O 為主
     this.pdfGate = new TaskGate(isMobileUI ? 1 : 2);   // readBinary + pdfjs 解碼，最吃記憶體
     this.xcalGate = new TaskGate(isMobileUI ? 1 : 2);  // Excalidraw 匯出：讀檔+SVG+柵格化，同樣吃 CPU/記憶體
+    /* 影片首幀：整檔讀入 + 解碼，比 PDF 更吃記憶體（讀檔的 buffer ＋ 解碼 frame 同時存在），
+       所以一律只做 1 張，不隨裝置放寬。反正結果會落盤，第二次進來就是讀檔。 */
+    this.videoGate = new TaskGate(1);
 
     // 長寬比預取：開資料夾時在背景把整批的長寬比補齊，總高度才能一次算準（見 dims.js）
     this.dimPrefetch = new DimPrefetcher(this);
@@ -8025,25 +8146,27 @@ class GalleryPlugin extends Plugin {
         } catch (e) {}
       }
     }
-    /* 長寬比索引有四種 key，全部都要清：
+    /* 長寬比索引有五種 key，全部都要清：
          '<路徑>'       vault 圖片本身
          'og:<路徑>'    該筆記的 og:image
          'pdf:<路徑>'   該 PDF 的第一頁縮圖
-         'xcal:<路徑>'  該 Excalidraw 繪圖的縮圖  */
+         'xcal:<路徑>'  該 Excalidraw 繪圖的縮圖
+         'video:<路徑>' 該影片的首幀封面  */
     const dim = this._dimIndex;
     if (dim) {
       const keys = DIM_KEY_PREFIXES.flatMap((pre) => this._pathsUnder(dim, path, pre));
       for (const k of keys) delete dim[k];
       if (keys.length) this.saveDimIndex();
     }
-    /* Excalidraw 縮圖快取：記憶體裡的 Map，key = '<路徑>:<mtime>'。
-       （檔案系統沒有對應產物——dataURL 只存在這一層，所以跟著檔案消失就好。） */
-    if (this._xcalThumbCache) {
-      for (const k of Array.from(this._xcalThumbCache.keys())) {
-        if (k.startsWith(path + ':') || k.startsWith(path + '/')) this._xcalThumbCache.delete(k);
+    /* 封面快取：記憶體那份是「路徑 → 資源路徑」的對應表（key = '<路徑>:<mtime>'），
+       磁碟那份在 cover-cache/。兩份都要跟著檔案消失，否則前者變成殭屍、後者變成孤兒。 */
+    for (const mem of [this._xcalThumbCache, this._videoCoverCache]) {
+      if (!mem) continue;
+      for (const k of Array.from(mem.keys())) {
+        if (k.startsWith(path + ':') || k.startsWith(path + '/')) mem.delete(k);
       }
     }
-    if (this.xcalCache) void this.xcalCache.forget(path);   // 磁碟那份也要清，否則永久孤兒
+    if (this.coverCache) void this.coverCache.forget(path);
     // 卡片高度索引（key 就是筆記路徑，同樣要含子路徑）
     const ch = this._cardH;
     if (ch) {
@@ -8071,6 +8194,26 @@ class GalleryPlugin extends Plugin {
     this._xcalPendT = setTimeout(() => this._flushXcalPending(), 600);
   }
 
+  /* 影片檔被替換（vault 'modify'）→ 封面要重抽。
+     ① 清封面快取（有同名封面圖的影片，那筆可能已經過期）
+     ② 清記憶體與磁碟快取（mtime 變了，舊那筆永遠不會再命中）
+     ③ 讓還掛著的卡片重抽（捲走的等下次進視野）。
+     ⚠️ 不動整面牆：refreshViews() 會重畫全部卡片、丟捲動位置，為一張卡不划算。 */
+  videoFileChanged(f) {
+    if (!f || this.state.videoCovers === false) return;   // 開關關掉 → 完全不插手
+    if (!VIDEO_EXT.test(f.path)) return;
+    invalidateCoverCache(f.path);
+    const c = this._videoCoverCache;
+    if (c) {
+      const pre = f.path + ':';
+      for (const k of Array.from(c.keys())) if (k.startsWith(pre)) c.delete(k);
+    }
+    if (this.coverCache) void this.coverCache.forget(f.path);
+    this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => {
+      if (leaf.view instanceof GalleryView) leaf.view.refreshVideoCards(f);
+    });
+  }
+
   _flushXcalPending() {
     const pend = this._xcalPend;
     if (!pend || !pend.size) return;
@@ -8087,7 +8230,7 @@ class GalleryPlugin extends Plugin {
         for (const k of Array.from(c.keys())) if (k.startsWith(pre)) c.delete(k);
       }
       /* 磁碟那份也清掉：mtime 變了，舊檔永遠不會再命中，留著只會被 prune 掃到。 */
-      if (this.xcalCache) void this.xcalCache.forget(f.path);
+      if (this.coverCache) void this.coverCache.forget(f.path);
       for (const v of views) v.refreshXcalCards(f);
     }
   }
@@ -8107,7 +8250,7 @@ class GalleryPlugin extends Plugin {
     };
     if (this._ogIndex && swap(this._ogIndex, '')) this.saveOgIndex();
     const dim = this._dimIndex;
-    // 四種前綴都要搬（用 reduce 而非 || ，每一種都必須執行，不能短路）
+    // 每一種前綴都要搬（用 reduce 而非 || ，每一種都必須執行，不能短路）
     if (dim && DIM_KEY_PREFIXES.reduce((n, pre) => n + swap(dim, pre), 0)) this.saveDimIndex();
     if (this._cardH && swap(this._cardH, '')) this.saveCardHeights();
     /* Excalidraw 縮圖快取：key 是 '<路徑>:<mtime>'，改名不改 mtime → 直接換頭，
@@ -8121,8 +8264,17 @@ class GalleryPlugin extends Plugin {
         xc.delete(k);
       }
     }
+    /* 影片封面的記憶體對應表同理（key 也是 '<路徑>:<mtime>'）。 */
+    const vc = this._videoCoverCache;
+    if (vc) {
+      for (const k of Array.from(vc.keys())) {
+        if (!k.startsWith(oldPath + ':') && !k.startsWith(oldPath + '/')) continue;
+        vc.set(newPath + k.slice(oldPath.length), vc.get(k));
+        vc.delete(k);
+      }
+    }
     /* 磁碟快取的檔名是路徑的 hash → 只能讀出來重寫一份（改名不頻繁，值得）。 */
-    if (this.xcalCache) void this.xcalCache.rename(newPath, oldPath);
+    if (this.coverCache) void this.coverCache.rename(newPath, oldPath);
   }
 
   /* og-cache 裡沒有任何索引項引用的圖檔＝孤兒，清掉。
@@ -8177,7 +8329,7 @@ class GalleryPlugin extends Plugin {
        下次啟動索引對不上 → 重抓重做、舊檔成孤兒。兩者都要補刷。 */
     await this.flushOgIndex();
     if (this.thumbs) { try { await this.thumbs.flush(); } catch (e) {} }
-    if (this.xcalCache) { try { await this.xcalCache.flush(); } catch (e) {} }
+    if (this.coverCache) { try { await this.coverCache.flush(); } catch (e) {} }
     await stateSaved;
   }
 
