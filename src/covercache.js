@@ -21,13 +21,15 @@
  *   3. **索引壞掉就當作空**。縮圖是純快取，任何異常都只是重做一次，不值得為了
  *      還原它去冒險（thumbs.js 的 prune 註解有同樣的取捨）。
  *
- * ⚠️ 配額是所有封面共用一份（設定頁「縮圖快取」）：影片首幀不會因為「另一種東西」
+ * ⚠️ 配額是所有封面共用一份（設定頁「封面快取」）：影片首幀不會因為「另一種東西」
  *    而繞過預算。呼叫端在 set() 回 null 時要接受「這張卡沒有封面」，不要另外退回
  *    內嵌 dataURL——那等於繞過配額，幾十張卡就能吃掉幾 MB 常駐記憶體。
+ *    （唯一的例外是 Excalidraw 的退回：見 gallery.js 的 renderXcalThumb，磁碟寫不進去時
+ *      仍留一份 dataURL 在記憶體，否則整面牆會少一張圖；那條路有 XCAL_THUMB_MAX 上限。）
  */
 
-const DEFAULT_MB_DESKTOP = 200;   // 200 張 ≈ 12MB（480px 寬），留足餘裕
-const DEFAULT_MB_MOBILE = 50;     // 手機磁碟小、也很少一次翻大資料夾
+const DEFAULT_MB_DESKTOP = 200;   // 200 MB：480px 縮圖約 30–100KB、影片首幀約 50–150KB，夠幾千張
+const DEFAULT_MB_MOBILE = 50;     // 50 MB：手機磁碟小、也很少一次翻大資料夾
 const MIN_MB = 10;
 const MAX_MB = 2000;
 const SINGLE_MAX_RATIO = 0.25;    // 單張不得超過預算的 1/4
@@ -265,7 +267,7 @@ class CoverCache {
     return removed;
   }
 
-  /** 設定頁「清除快取」：整個目錄清空（不是只清失效的） */
+  /** 設定頁「清除封面快取」：整個目錄清空（不是只清失效的） */
   async clearAll() {
     await this.ensure();
     const a = this.app.vault.adapter;
