@@ -6409,8 +6409,9 @@ class GnSearchModal extends SuggestModal {
 }
 
 class GnSearchIndex {
-  constructor(app) {
+  constructor(app, plugin) {
     this.app = app;
+    this.plugin = plugin || null;   // 非 md 的檔案標籤存在 plugin.state.assetTags
     this.docs = [];        // id → { path, title, len, mtime }；null = 墓碑（已刪除/已過期）
     this.byPath = new Map(); // path → id（增量更新時要找回舊 id）
     // token → 扁平陣列 [id, tf, id, tf, …]
@@ -6507,6 +6508,12 @@ class GnSearchIndex {
         [f.basename, 8],
         [text, 1],
       ];
+    } else if (f.extension !== 'md') {
+      // 非 md 沒有內文可讀：只索引檔名 + 檔案標籤
+      fields = [
+        [f.basename, 8],
+        [tagsOfFile(this.app, this.plugin && this.plugin.state, f).join(' '), 3],
+      ];
     } else {
       let raw = '';
       try { raw = await this.app.vault.cachedRead(f); } catch (e) { return; }
@@ -6591,12 +6598,10 @@ class GnSearchIndex {
     this.deadLen = 0;
   }
 
-  // 要進索引的檔案：全部 md + 全部 pdf
+  // 要進索引的檔案：全部 md、全部 pdf，以及「有打標籤」的其他檔案
   // （pdf 的內文只吃 text-extractor「已快取」的部分，建索引時不會去解析／OCR）
   indexTargets() {
-    const md = this.app.vault.getMarkdownFiles();
-    const pdf = this.app.vault.getFiles().filter((f) => f.extension === 'pdf');
-    return md.concat(pdf);
+    return this.app.vault.getFiles().filter((f) => this.indexable(f));
   }
 
   async build(onProgress) {
@@ -6629,15 +6634,29 @@ class GnSearchIndex {
     return this._buildPromise;
   }
 
-  // 這個副檔名要進索引嗎
+  // 這份檔案要進索引嗎：md / pdf 一律進；其他檔型只有「有標籤」才進
+  // （否則整個 vault 的附件都會被索引，白吃記憶體又搜不到東西）
   indexable(file) {
-    return file instanceof TFile && (file.extension === 'md' || file.extension === 'pdf');
+    if (!(file instanceof TFile)) return false;
+    const ext = file.extension;
+    if (ext === 'md' || ext === 'pdf') return true;
+    return this.hasAssetTags(file);
+  }
+
+  hasAssetTags(file) {
+    const map = this.plugin && this.plugin.state && this.plugin.state.assetTags;
+    const list = map && file && map[file.path];
+    return !!(Array.isArray(list) && list.length);
   }
 
   /* ===== 增量更新：只重建「那一篇」，幾 ms ===== */
   async onFileChanged(file) {
-    if (!this.ready || !this.indexable(file)) return;
+    if (!this.ready || !(file instanceof TFile)) return;
+    const keep = this.indexable(file);
+    // md / pdf 永遠該在索引裡；其他檔型標籤被拿光 → 只移除、不再索引
+    if (!keep && (file.extension === 'md' || file.extension === 'pdf')) return;
     this._tombstone(file.path);
+    if (!keep) { this.maybeCompact(); return; }
     await this._indexFile(file);
     this.maybeCompact();
     // 新加進來的 PDF → 背景把內文抽出來（抽完會自己再索引一次）
@@ -6844,7 +6863,7 @@ class GalleryPlugin extends Plugin {
        設計：不持久化。索引 4MB，但存成 JSON 會膨脹到 5~10MB，
        手機讀寫比「直接重建（0.6 秒）」還慢，而且要處理版本/失效/髒資料。
        → 惰性建立（第一次搜尋才建）＋ 增量更新，一個 session 只建一次。 */
-    this.search = new GnSearchIndex(this.app);
+    this.search = new GnSearchIndex(this.app, this);
 
     // 增量更新：改一篇只重索引那一篇（幾 ms），索引全程保持新鮮
     this.registerEvent(this.app.vault.on('modify', (f) => {
@@ -7306,7 +7325,8 @@ class GalleryPlugin extends Plugin {
     if (!tag) return false;
     if (file.extension !== 'md') {
       const added = this.assetTagsAdd(file, tag);
-      if (added) this.saveState();
+      // 標籤也是搜尋欄位（見 GnSearchIndex.indexable）：變動後重編這一份
+      if (added) { this.saveState(); if (this.search) this.search.onFileChanged(file); }
       return added;
     }
     let added = false;
@@ -7328,7 +7348,7 @@ class GalleryPlugin extends Plugin {
     if (!tag) return false;
     if (file.extension !== 'md') {
       const removed = this.assetTagsRemove(file, tag);
-      if (removed) this.saveState();
+      if (removed) { this.saveState(); if (this.search) this.search.onFileChanged(file); }
       return removed;
     }
     let removed = false;
