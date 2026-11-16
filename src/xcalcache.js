@@ -170,35 +170,57 @@ class XcalCache {
     })();
   }
 
-  /** 來源檔被刪除 → 連磁碟檔一起清掉 */
-  async forget(path) {
-    await this.ensure();
-    const rec = this.index[path];
-    if (!rec) return;
-    this.used -= rec[2] || 0;
-    delete this.index[path];
-    this.save();
-    try { await this.app.vault.adapter.remove(this.dir() + '/' + rec[0]); } catch (e) {}
+  /* 這個路徑本身與它下面所有子路徑的索引鍵。
+     ⚠️ 資料夾被刪除／改名時，傳進來的是資料夾路徑，只處理「完全相等」那一筆
+        會把整個子樹的縮圖留成永久孤兒（要等使用者手動清快取才會消失）。 */
+  _keysUnder(path) {
+    const prefix = path + '/';
+    return Object.keys(this.index).filter((k) => k === path || k.startsWith(prefix));
   }
 
-  /** 改名／搬移 → 檔名是 path 的 hash，只能讀出來重寫一份（少見，值得這個成本） */
+  /** 來源檔被刪除（或整個資料夾被刪）→ 連磁碟檔一起清掉 */
+  async forget(path) {
+    await this.ensure();
+    const keys = this._keysUnder(path);
+    if (!keys.length) return;
+    const a = this.app.vault.adapter;
+    const doomed = [];
+    for (const k of keys) {
+      doomed.push(this.index[k][0]);
+      this.used -= this.index[k][2] || 0;
+      delete this.index[k];
+    }
+    this.save();
+    for (const fname of doomed) {
+      try { await a.remove(this.dir() + '/' + fname); } catch (e) {}
+    }
+  }
+
+  /** 改名／搬移（含整個資料夾）→ 檔名是路徑的 hash，只能讀出來重寫一份。
+      少見操作，值得這個成本；做不動就讓它下次重做，不影響正確性。 */
   async rename(newPath, oldPath) {
     await this.ensure();
-    const rec = this.index[oldPath];
-    if (!rec) return;
-    this.used -= rec[2] || 0;
-    delete this.index[oldPath];
-    try {
-      const a = this.app.vault.adapter;
-      const src = this.dir() + '/' + rec[0];
-      const data = await a.readBinary(src);
-      const ext = rec[0].slice(rec[0].lastIndexOf('.') + 1);
-      const fname = hash64(newPath) + '.' + ext;
-      await a.writeBinary(this.dir() + '/' + fname, new Uint8Array(data));
-      try { await a.remove(src); } catch (e) {}
-      this.index[newPath] = [fname, rec[1], rec[2], Date.now()];
-      this.used += rec[2] || 0;
-    } catch (e) {}
+    const keys = this._keysUnder(oldPath);
+    if (!keys.length) return;
+    const a = this.app.vault.adapter;
+    for (const k of keys) {
+      const rec = this.index[k];
+      const nk = newPath + k.slice(oldPath.length);
+      this.used -= rec[2] || 0;
+      delete this.index[k];
+      try {
+        const src = this.dir() + '/' + rec[0];
+        const data = await a.readBinary(src);
+        const ext = rec[0].slice(rec[0].lastIndexOf('.') + 1);
+        const fname = hash64(nk) + '.' + ext;
+        await a.writeBinary(this.dir() + '/' + fname, new Uint8Array(data));
+        try { await a.remove(src); } catch (e) {}
+        this.index[nk] = [fname, rec[1], rec[2], Date.now()];
+        this.used += rec[2] || 0;
+      } catch (e) {
+        /* 這筆搬不動 → 就當作沒快取，下次生成時重建 */
+      }
+    }
     this.save();
   }
 
