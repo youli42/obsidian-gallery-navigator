@@ -539,6 +539,15 @@ function tagsOfFile(app, state, f) {
   return assetTagsOf(state, f);
 }
 
+/* 哪些檔案「可以被期待有標籤」：md、圖片、PDF、Canvas、Base。
+   其他附件（mp3 / zip / json / mp4…）沒標籤是正常的，算進「未標籤」只會讓
+   計數失真、把未標籤清單灌滿。標籤本身不限檔型，這裡只影響未標籤統計。 */
+const TAGGABLE_EXT = new Set(['md', 'pdf', 'canvas', 'base', 'excalidraw']);
+function isTaggableFile(f) {
+  if (!(f instanceof TFile)) return false;
+  return TAGGABLE_EXT.has((f.extension || '').toLowerCase()) || IMG_EXT.test(f.path);
+}
+
 // 從筆記取「代表連結」：優先 frontmatter.source，否則內文第一個 http(s) 網址
 function firstExternalUrl(frontmatter, content) {
   const fromFm = frontmatter && frontmatter.source;
@@ -4594,7 +4603,8 @@ class GalleryView extends ItemView {
        標籤來自 state.assetTags，由 tagsOfFile() 統一取得。 */
     for (const f of this.app.vault.getFiles()) {
       const tags = tagsOfFile(this.app, this.plugin.state, f);
-      if (!tags.length) { untagged.push(f); continue; }
+      // 未標籤只算「本來就該有標籤」的檔型，不然每個附件都會被算進去
+      if (!tags.length) { if (isTaggableFile(f)) untagged.push(f); continue; }
       const added = new Set();
       for (const t of tags) {
         const clean = String(t).replace(/^#/, '');
