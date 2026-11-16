@@ -7046,6 +7046,12 @@ class GalleryPlugin extends Plugin {
     const disk = (await this.loadData()) || {};
     const localSaved = this.loadLocalState();
     this.state = Object.assign({ lastPath: '', cardWidth: 120, sort: 'new', folderOrder: {}, hiddenFolders: [], folderColors: {}, expandedFolders: [], treeWidth: 232, treeCollapsed: false, syncActive: true, leftMode: 'folder', activeTag: '', expandedTags: [], cardColors: {}, noPreviewFolders: [], folderLayouts: {}, favorites: [], pinnedCards: [], assetTags: {}, lang: '', openUnfocused: true, imageCardLayout: 'stacked', autoCardColor: false, excalidrawThumbs: true, videoCovers: true, videoCoverMaxMB: 0, coverCacheMB: 0 }, disk, localSaved ? splitState(localSaved).local : null);
+    /* 舊版 dev 把封面快取上限存在 xcalCacheMB（2026-11-16 同日改名為 coverCacheMB）。
+       不繼承的話，調過上限的人會悄悄回到預設值（桌機 200MB、手機 50MB）。
+       ⚠️ 只有在「舊版寫過、新版還來不及寫」時才套用：一旦 data.json 有 coverCacheMB
+         （使用者把新版的值清回預設 0 也算寫過），就不再回頭套舊值，否則每次啟動都被拉回去。 */
+    if (!('coverCacheMB' in disk) && Number(disk.xcalCacheMB) > 0) this.state.coverCacheMB = Number(disk.xcalCacheMB);
+
     // 三方合併的基準：上次看到的磁碟內容（只含共用設定）
     this._syncBase = splitState(disk).shared;
 
@@ -7160,6 +7166,8 @@ class GalleryPlugin extends Plugin {
        索引在第一次真的要用時才讀（ensure），不佔啟動時間；
        預設大小見 covercache.js（桌面 200MB／手機 50MB），可在設定頁改。 */
     this.coverCache = new CoverCache(this);
+    /* 目錄舊名 xcal-cache/ → cover-cache/（同日改名）。舊目錄已經沒有人讀寫，清掉回收空間。 */
+    void this.dropLegacyCoverCacheDir();
 
     /* og 圖抓取與 PDF 解析的併發閘（見檔案上方 TaskGate）。
        手機記憶體與頻寬都更緊，各降一級。 */
@@ -8266,6 +8274,19 @@ class GalleryPlugin extends Plugin {
       if (this.coverCache) void this.coverCache.forget(f.path);
       for (const v of views) v.refreshVideoCards(f);
     }
+  }
+
+  /* 封面快取目錄舊名 xcal-cache/（2026-11-16 當天改名為 cover-cache/）。
+     舊目錄已經沒有任何程式讀寫，內容全是可重建的縮圖 → 直接清掉，不留純佔空間的殘骸。 */
+  async dropLegacyCoverCacheDir() {
+    try {
+      const a = this.app.vault.adapter;
+      const dir = this.manifest.dir + '/xcal-cache';
+      if (!(await a.exists(dir))) return;
+      const list = await a.list(dir);
+      for (const f of (list.files || [])) { try { await a.remove(f); } catch (e) {} }
+      try { await a.rmdir(dir); } catch (e) {}
+    } catch (e) {}
   }
 
   _flushXcalPending() {
