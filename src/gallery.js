@@ -8234,15 +8234,37 @@ class GalleryPlugin extends Plugin {
     if (!f || this.state.videoCovers === false) return;   // 開關關掉 → 完全不插手
     if (!VIDEO_EXT.test(f.path)) return;
     invalidateCoverCache(f.path);
-    const c = this._videoCoverCache;
-    if (c) {
-      const pre = f.path + ':';
-      for (const k of Array.from(c.keys())) if (k.startsWith(pre)) c.delete(k);
-    }
-    if (this.coverCache) void this.coverCache.forget(f.path);
+    /* 大影片複製／下載進 vault 會連發數十次 'modify'，而每一次重抽都是整檔讀入＋解碼
+       （記憶體峰值見 videocover.js）。比照 xcal：600ms 內的連續修改只處理最後一次，
+       否則邊複製邊抽幀＝同一段時間反覆讀幾十次大檔。 */
+    const pend = this._videoPend || (this._videoPend = new Map());
+    pend.set(f.path, f);
+    clearTimeout(this._videoPendT);
+    this._videoPendT = setTimeout(() => this._flushVideoPending(), 600);
+  }
+
+  /* 去抖後的實際處理：清記憶體與磁碟快取（mtime 變了，舊那筆永遠不會再命中），
+     再請各視圖把還掛在牆上的卡片重抽。 */
+  _flushVideoPending() {
+    const pend = this._videoPend;
+    if (!pend || !pend.size) return;
+    const files = Array.from(pend.values());
+    pend.clear();
+    const views = [];
     this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => {
-      if (leaf.view instanceof GalleryView) leaf.view.refreshVideoCards(f);
+      if (leaf.view instanceof GalleryView) views.push(leaf.view);
     });
+    for (const f of files) {
+      /* 排隊期間可能已經被刪掉／改名 → 沒有東西可以重抽。 */
+      if (!(this.app.vault.getAbstractFileByPath(f.path) instanceof TFile)) continue;
+      const c = this._videoCoverCache;
+      if (c) {
+        const pre = f.path + ':';
+        for (const k of Array.from(c.keys())) if (k.startsWith(pre)) c.delete(k);
+      }
+      if (this.coverCache) void this.coverCache.forget(f.path);
+      for (const v of views) v.refreshVideoCards(f);
+    }
   }
 
   _flushXcalPending() {
