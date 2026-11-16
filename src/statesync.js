@@ -83,6 +83,47 @@ function mergeObject(base, local, remote) {
   return out;
 }
 
+/* 標籤是「集合」不是「值」：同一張圖在兩台裝置各加一個標籤時，
+   整段陣列用本地覆蓋會丟掉另一邊的標籤。這裡做真正的三方集合合併：
+     · 只有一邊相對 base 有變化 → 套用那一邊（含刪除）
+     · 兩邊都有變化 → 兩邊都有的留下
+   標籤正規化（去 #、去空白、排序）也在這裡做，避免 'a' 與 '#a' 被當成兩個。
+   大小寫視為同一個標籤（與 assetTagsAdd 的去重一致），顯示保留本機寫法。 */
+function tagMapOf(v, into) {
+  const out = into || new Map();          // lower-case → 原始寫法
+  for (const x of (Array.isArray(v) ? v : [])) {
+    const s = String(x == null ? '' : x).replace(/^#/, '').trim();
+    if (s && !out.has(s.toLowerCase())) out.set(s.toLowerCase(), s);
+  }
+  return out;
+}
+
+function mergeTagMap(base, local, remote) {
+  base = isPlainObject(base) ? base : {};
+  local = isPlainObject(local) ? local : {};
+  remote = isPlainObject(remote) ? remote : {};
+  const out = {};
+  const paths = new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(remote)]);
+  for (const p of paths) {
+    const b = tagMapOf(base[p]), l = tagMapOf(local[p]), r = tagMapOf(remote[p]);
+    const keep = new Map();
+    for (const tag of new Set([...b.keys(), ...l.keys(), ...r.keys()])) {
+      const inB = b.has(tag), inL = l.has(tag), inR = r.has(tag);
+      const localChanged = inL !== inB;
+      const remoteChanged = inR !== inB;
+      let take = false;
+      if (localChanged && remoteChanged) take = inL || inR;
+      else if (localChanged) take = inL;
+      else if (remoteChanged) take = inR;
+      else take = inL;
+      // 顯示寫法：本機 > base > 遠端
+      if (take) keep.set(tag, l.get(tag) || b.get(tag) || r.get(tag));
+    }
+    if (keep.size) out[p] = [...keep.values()].sort((x, y) => x.localeCompare(y));
+  }
+  return out;
+}
+
 /**
  * 三方合併共用設定。
  *   base   ＝上次看到的磁碟內容
@@ -105,7 +146,17 @@ function mergeShared(base, local, remote) {
     if (!inR) { merged[k] = local[k]; continue; }
     if (!inL) { merged[k] = remote[k]; continue; }
     const b = base[k];
-    if (isPlainObject(local[k]) && isPlainObject(remote[k]) && (b === undefined || isPlainObject(b))) {
+    if (k === 'assetTags') {
+      /* 檔案標籤用集合合併，避免兩台各加一個標籤時互相覆蓋。
+         空物件的判讀只在「base 也還是空」時保守 —— 那是升級後第一次同步，
+         別台很可能還不認得這個欄位。一旦同步過（base 非空），遠端變空就是
+         對方真的清空了，要照樣採納；否則清空會被這台一直復活。 */
+      const baseEmpty = !isPlainObject(b) || !Object.keys(b).length;
+      const remoteEmpty = !isPlainObject(remote[k]) || !Object.keys(remote[k]).length;
+      const keepLocal = remoteEmpty && baseEmpty &&
+        isPlainObject(local[k]) && Object.keys(local[k]).length;
+      merged[k] = keepLocal ? clone(local[k]) : mergeTagMap(b || {}, local[k], remote[k]);
+    } else if (isPlainObject(local[k]) && isPlainObject(remote[k]) && (b === undefined || isPlainObject(b))) {
       merged[k] = mergeObject(b || {}, local[k], remote[k]);
     } else {
       merged[k] = deepEqual(local[k], b) ? remote[k] : local[k];

@@ -45,6 +45,7 @@ Three layouts, switchable any time from the toolbar's **⋯ More** panel — the
 - Multi-select folders for batch moves — `Cmd`/`Ctrl`-click to add, `Shift`-click for a range, or **Select multiple** from the long-press menu on mobile. Drag any selected folder to move the whole batch
 - Renaming or moving a folder keeps its position in the tree, along with its color, icon, hidden state, favorite status, and layout
 - Bear-style nested tag tree with an "untagged" node
+- Tags are not Markdown-only: images, PDFs, Canvas and other files can be tagged too (right-click **Tags…**, drag onto a tag row, or tag a multi-selection), sharing the same tag tree, filters and “untagged” node as notes
 - Follow mode: opening a note reveals it in the tree and card wall
 - Mobile: side-by-side panes with finger-following swipe navigation
 - Multi-device friendly: shared settings (folder order, colors, icons, pins, favorites…) are merged with whatever another device has written instead of overwriting it, and are picked up without restarting Obsidian. Per-device view state (current folder, expanded folders, pane width, card size) stays on each device
