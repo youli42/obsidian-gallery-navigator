@@ -9,6 +9,7 @@
 const { Plugin, ItemView, MarkdownView, TFolder, TFile, Menu, FuzzySuggestModal, SuggestModal, Notice, setIcon, addIcon, getIconIds, Modal, requestUrl, PluginSettingTab, Setting, loadPdfJs } = require('obsidian');
 const { t, setLang, isZh } = require('./i18n.js');
 const { ThumbCache } = require('./thumbs.js');
+const { XcalCache, DEFAULT_MB_DESKTOP, DEFAULT_MB_MOBILE, MIN_MB, MAX_MB } = require('./xcalcache.js');
 const { DimPrefetcher } = require('./dims.js');
 const { setupCanvasImageToNote } = require('./canvasnote.js');
 const { VirtualWall } = require('./virtual.js');
@@ -611,8 +612,14 @@ function coverFor(app, f, isImg) {
       讀到，而虛擬牆對**全部**項目（含螢幕外）估高度（virtual.js relayout 迴圈）。
       掛在 src 上 = 開一個 200 張繪圖的資料夾，首幀就排 200 次匯出。
       改為沿用 PDF 那套：卡片捲進視野（_ogObserver）才生。 */
-const XCAL_THUMB_MAX = 40;    // 常駐縮圖筆數上限（值是 dataURL 字串，見 renderXcalThumb）
-const XCAL_THUMB_W = 800;     // 柵格化目標寬：最寬欄位 ~400 CSS px 的 2 倍
+/* 記憶體快取（2026-11-16）：值從 dataURL 變成「資源路徑」這種短字串，
+   大圖本体在 xcal-cache/ 磁碟上。所以這裡留筆數上限就好，位元組預算在磁碟那層管
+   （見 xcalcache.js）。原本 40 筆是為了壓 dataURL 的記憶體，現在不需要那麼緊。 */
+const XCAL_THUMB_MAX = 500;   // 常駐「路徑 → 資源路徑」對應表的筆數上限
+/* 柵格化目標寬（2026-11-16：800 → 480）。
+   卡片最寬約 400 CSS px，480 已足夠高 DPI 使用；面積從 800 降到 480 只剩 36%，
+   匯出後的 PNG 體積與編碼耗時都降到約 1/3（實測 800px 時單張中位 121KB、最大 1.24MB）。 */
+const XCAL_THUMB_W = 480;
 const XCAL_SVG_MAX = 1500000; // 退回存 SVG 字串時的單張上限（1.5MB），超過就放棄這張
 
 /** 這是不是 Excalidraw 繪圖檔？
@@ -692,7 +699,7 @@ function xcalSvgSize(svg) {
   return { w, h };
 }
 
-/* SVG dataURL → PNG dataURL（目標寬 maxW）。
+/* SVG dataURL → PNG **Blob**（目標寬 maxW）。
    一定要柵格化：匯出得要 embedFont=true，否則手繪字退成系統字、和筆記裡長得不一樣；
    而內嵌字體之後 SVG 動輒幾百 KB，常駐 40 張就是幾 MB～幾十 MB。柵格化之後常駐的
    只剩有界的一小張 PNG（取捨同 renderPdfFirstPage）。
@@ -712,12 +719,28 @@ function xcalRasterPng(src, w, h, maxW) {
         const c = document.createElement('canvas');
         c.width = cw; c.height = ch;
         c.getContext('2d').drawImage(im, 0, 0, cw, ch);
-        resolve(c.toDataURL('image/png'));
+        /* toBlob 而不是 toDataURL（2026-11-16）：PNG 編碼同樣在主執行緒，但 toBlob 是
+           「編完才回呼」，不用先組出一個 1.33 倍大小的 base64 字串再丟掉。
+           省下來的是字串配置與 GC，以及落盤時少一次 decode。 */
+        c.toBlob((b) => { try { c.width = 0; c.height = 0; } catch (e) {} resolve(b || null); }, 'image/png');
       } catch (e) { resolve(null); }
     };
     im.onerror = () => resolve(null);
     im.decoding = 'async';
     im.src = src;
+  });
+}
+
+/* Blob → dataURL。只在「落盤失敗」這種罕見路徑用得到（見 renderXcalThumb）：
+   正常情況縮圖直接從磁碟讀，不該在記憶體留 base64。 */
+function blobToDataURL(blob) {
+  return new Promise((resolve) => {
+    try {
+      const fr = new FileReader();
+      fr.onload = () => resolve(typeof fr.result === 'string' ? fr.result : null);
+      fr.onerror = () => resolve(null);
+      fr.readAsDataURL(blob);
+    } catch (e) { resolve(null); }
   });
 }
 
@@ -2715,6 +2738,16 @@ class GalleryView extends ItemView {
     };
     const dropLateFlag = () => { if (card._lateImg) { card._lateImg = false; this.relayoutWalls(card); } };
     if (cache.has(key)) { const d = cache.get(key); if (d) put(d); else dropLateFlag(); return; }
+    /* 磁碟快取命中（2026-11-16）：連閘門都不用進。
+       成本只剩「讀檔 + 瀏覽器解碼」，比重新匯出便宜一個數量級（匯出 58ms 中位數）。
+       mtime 不符時 urlFor 自己回 null → 落到下面的重新生成。 */
+    if (this.plugin.xcalCache) {
+      try {
+        await this.plugin.xcalCache.ensure();
+        const url = this.plugin.xcalCache.urlFor(file);
+        if (url) { cache.set(key, url); put(url); return; }
+      } catch (e) {}
+    }
     const src = await this.plugin.xcalGate.run(key, () => this.renderXcalThumb(file, cache, key));
     if (src === GATE_DROPPED) { this.requeueLazy(card, '_xcalFile', file); return; }
     if (src && card.isConnected) put(src);
@@ -2764,11 +2797,33 @@ class GalleryView extends ItemView {
       const svgStr = svg.outerHTML;
       const size = xcalSvgSize(svg);
       const svgUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgStr);
+      /* 先落盤、再進記憶體（2026-11-16）。順序不能反：
+         落盤成功的話記憶體只留一個短資源路徑；反過來就會先把幾百 KB 的 dataURL
+         塞進 Map，等寫盤完才丟掉，白做一次搬運。 */
+      const xc = this.plugin.xcalCache;
       const png = await xcalRasterPng(svgUrl, size.w, size.h, XCAL_THUMB_W);
-      if (png) return save(png);
-      /* 柵格化失敗才退回直接放 SVG：<img> 顯示 SVG 沒問題，但那份字串會常駐在快取裡。
-         內嵌字體＋內嵌圖片的 SVG 輕易就幾 MB，40 張就是幾百 MB——超過門檻寧可留文字卡。 */
+      if (png) {
+        try {
+          if (xc) {
+            const url = await xc.set(file, new Uint8Array(await png.arrayBuffer()), 'png');
+            if (url) return save(url);
+          }
+        } catch (e) {}
+        /* 寫不進磁碟才退回 dataURL（磁碟滿、目錄不可寫）。罕見，但要留這條路，
+           否則一張縮圖失敗就讓整面牆少一張圖。 */
+        const dataUrl = await blobToDataURL(png);
+        if (dataUrl) return save(dataUrl);
+        return save(null);
+      }
+      /* 柵格化失敗才退回直接放 SVG：<img> 顯示 SVG 沒問題，內嵌字體照常生效。
+         SVG 動輒幾 MB，所以先試落盤，只有落盤也失敗才留字串在記憶體（XCAL_SVG_MAX 封頂）。 */
       if (svgUrl.length > XCAL_SVG_MAX) return save(null);
+      try {
+        if (xc) {
+          const url = await xc.set(file, new TextEncoder().encode(svgStr), 'svg');
+          if (url) return save(url);
+        }
+      } catch (e) {}
       return save(svgUrl);
     } catch (e) { return save(null); }
   }
@@ -5962,6 +6017,47 @@ class GallerySettingTab extends PluginSettingTab {
       .addToggle((tg) => tg.setValue(st.excalidrawThumbs !== false)
         .onChange((v) => { st.excalidrawThumbs = v; save(); this.plugin.refreshViews(); }));
 
+    /* Excalidraw 縮圖落盤快取（2026-11-16）：縮圖只匯出一次、存在 xcal-cache/，
+       之後進同一個資料夾直接讀檔，不再跑 createSVG。
+       上限是「每台裝置」的位元組預算（磁碟是各自的，不同步到其他裝置）。
+       這裡刻意用位元組而不是張數：實測單張 45KB–1.24MB，張數上限對體積完全沒有保護力。 */
+    const xcache = this.plugin.xcalCache;
+    const fmtBytes = (bytes) => (bytes >= 1024 * 1024
+      ? (bytes / 1024 / 1024).toFixed(1) + ' MB'
+      : Math.max(0, Math.round(bytes / 1024)) + ' KB');
+    const defaultMB = () => (document.body.classList.contains('is-mobile') ? DEFAULT_MB_MOBILE : DEFAULT_MB_DESKTOP);
+    const cacheDesc = (size) => t('Excalidraw drawings are exported once and the image is kept on disk, so revisiting a folder no longer re-exports them. The limit is a per-device budget; least recently used images are removed when it is exceeded. Currently using {{size}}.', { size });
+    const cacheSetting = new Setting(containerEl)
+      .setName(t('Excalidraw thumbnail cache'))
+      .setDesc(cacheDesc('…'))
+      .addText((tx) => {
+        tx.inputEl.type = 'number';
+        tx.inputEl.min = String(MIN_MB);
+        tx.inputEl.max = String(MAX_MB);
+        tx.setPlaceholder(String(defaultMB()));
+        tx.setValue(String(st.xcalCacheMB || defaultMB()));
+        tx.onChange((v) => {
+          const n = Math.round(Number(v));
+          if (!Number.isFinite(n) || n <= 0) { st.xcalCacheMB = 0; save(); void refreshCacheDesc(); return; }
+          st.xcalCacheMB = Math.min(MAX_MB, Math.max(MIN_MB, n));
+          save();
+          /* 調得比目前用量小 → 立刻淘汰一次，不然要等下一張圖進來才收斂。 */
+          void (async () => { if (xcache) await xcache.prune(); await refreshCacheDesc(); })();
+        });
+      })
+      .addButton((b) => b.setButtonText(t('Clear Excalidraw cache')).onClick(async () => {
+        const n = xcache ? await xcache.clearAll() : 0;
+        await refreshCacheDesc();
+        this.plugin.refreshViews();
+        new Notice(t('Removed {{n}} cached Excalidraw thumbnails', { n }));
+      }));
+    const refreshCacheDesc = async () => {
+      if (!xcache) return;
+      try { await xcache.ensure(); } catch (e) {}
+      cacheSetting.setDesc(cacheDesc(fmtBytes(xcache.usage())));
+    };
+    void refreshCacheDesc();
+
     new Setting(containerEl)
       .setName(t('Open notes without focusing the editor'))
       .setDesc(t('Notes opened from the gallery start unfocused, so a first-line image embed stays rendered instead of expanding to markdown. Click into the note to edit as usual.'))
@@ -6607,7 +6703,7 @@ class GalleryPlugin extends Plugin {
        本機那份優先；升級後第一次執行還沒有 → 沿用 data.json 裡的（以前都存在那裡）。 */
     const disk = (await this.loadData()) || {};
     const localSaved = this.loadLocalState();
-    this.state = Object.assign({ lastPath: '', cardWidth: 120, sort: 'new', folderOrder: {}, hiddenFolders: [], folderColors: {}, expandedFolders: [], treeWidth: 232, treeCollapsed: false, syncActive: true, leftMode: 'folder', activeTag: '', expandedTags: [], cardColors: {}, noPreviewFolders: [], folderLayouts: {}, favorites: [], pinnedCards: [], lang: '', openUnfocused: true, imageCardLayout: 'stacked', autoCardColor: false, excalidrawThumbs: true }, disk, localSaved ? splitState(localSaved).local : null);
+    this.state = Object.assign({ lastPath: '', cardWidth: 120, sort: 'new', folderOrder: {}, hiddenFolders: [], folderColors: {}, expandedFolders: [], treeWidth: 232, treeCollapsed: false, syncActive: true, leftMode: 'folder', activeTag: '', expandedTags: [], cardColors: {}, noPreviewFolders: [], folderLayouts: {}, favorites: [], pinnedCards: [], lang: '', openUnfocused: true, imageCardLayout: 'stacked', autoCardColor: false, excalidrawThumbs: true, xcalCacheMB: 0 }, disk, localSaved ? splitState(localSaved).local : null);
     // 三方合併的基準：上次看到的磁碟內容（只含共用設定）
     this._syncBase = splitState(disk).shared;
 
@@ -6716,6 +6812,10 @@ class GalleryPlugin extends Plugin {
     // 縮圖快取：卡片牆不再直接解碼原圖（見 thumbs.js 開頭的說明）
     this.thumbs = new ThumbCache(this);
     this.thumbs.load();
+
+    /* Excalidraw 縮圖的落盤快取（2026-11-16）。索引在第一次真的要用時才讀（ensure），
+       不佔啟動時間；預設大小見 xcalcache.js（桌面 200MB／手機 50MB），可在設定頁改。 */
+    this.xcalCache = new XcalCache(this);
 
     /* og 圖抓取與 PDF 解析的併發閘（見檔案上方 TaskGate）。
        手機記憶體與頻寬都更緊，各降一級。 */
@@ -7570,6 +7670,7 @@ class GalleryPlugin extends Plugin {
         if (k.startsWith(path + ':') || k.startsWith(path + '/')) this._xcalThumbCache.delete(k);
       }
     }
+    if (this.xcalCache) void this.xcalCache.forget(path);   // 磁碟那份也要清，否則永久孤兒
     // 卡片高度索引（key 就是筆記路徑，同樣要含子路徑）
     const ch = this._cardH;
     if (ch) {
@@ -7612,6 +7713,8 @@ class GalleryPlugin extends Plugin {
         const pre = f.path + ':';
         for (const k of Array.from(c.keys())) if (k.startsWith(pre)) c.delete(k);
       }
+      /* 磁碟那份也清掉：mtime 變了，舊檔永遠不會再命中，留著只會被 prune 掃到。 */
+      if (this.xcalCache) void this.xcalCache.forget(f.path);
       for (const v of views) v.refreshXcalCards(f);
     }
   }
@@ -7645,6 +7748,8 @@ class GalleryPlugin extends Plugin {
         xc.delete(k);
       }
     }
+    /* 磁碟快取的檔名是路徑的 hash → 只能讀出來重寫一份（改名不頻繁，值得）。 */
+    if (this.xcalCache) void this.xcalCache.rename(newPath, oldPath);
   }
 
   /* og-cache 裡沒有任何索引項引用的圖檔＝孤兒，清掉。
@@ -7699,6 +7804,7 @@ class GalleryPlugin extends Plugin {
        下次啟動索引對不上 → 重抓重做、舊檔成孤兒。兩者都要補刷。 */
     await this.flushOgIndex();
     if (this.thumbs) { try { await this.thumbs.flush(); } catch (e) {} }
+    if (this.xcalCache) { try { await this.xcalCache.flush(); } catch (e) {} }
     await stateSaved;
   }
 
