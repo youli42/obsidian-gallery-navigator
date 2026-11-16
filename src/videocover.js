@@ -15,7 +15,7 @@
  *    vault.readBinary → Blob → URL.createObjectURL 給的是**同源** blob:，
  *    canvas 不會被污染，也不需要替影片檔處理任何 CORS。
  *    代價是整個檔案要讀進記憶體一次（Obsidian 的 adapter 沒有範圍讀取），
- *    所以只對 MAX_SOURCE_BYTES 以下的影片這樣做；更大的維持圖示卡。
+ *    所以只對「裝置上限」以下的影片這樣做；更大的維持圖示卡。
  *
  * ⚠️ 容器支援度（Chromium／Obsidian 內建）：
  *    mp4 / m4v / mov / webm 正常；mkv 多半可以解出畫面（音訊不一定）；
@@ -29,7 +29,12 @@ const VIDEO_EXT = /\.(mp4|m4v|mov|webm|mkv|avi|ogv)$/i;
       所以 .cover.* 這種「一看就知道是封面」的寫法優先。 */
 const SIBLING_EXTS = ['.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif'];
 
-const MAX_SOURCE_BYTES = 120 * 1024 * 1024;   // 讀整檔解碼的上限
+/* 讀整檔解碼的上限（2026-11-16）：readBinary 的 buffer 與 Blob／解碼中的畫格會同時存在，
+   記憶體峰值大約是檔案大小的兩倍。手機（iOS WebView）記憶體緊、太大會被系統直接砍掉，
+   所以預設值分兩套：桌機 120MB、手機 30MB。
+   ⚠️ 使用者的設定值在設定頁（gallery.js 的 videoCoverMaxMB），這裡只是「沒設定時」的預設。 */
+const MAX_SOURCE_MB_DESKTOP = 120;
+const MAX_SOURCE_MB_MOBILE = 30;
 const FRAME_MAX_W = 640;                       // 卡片最寬約 400 CSS px，640 夠 2 倍螢幕
 const FRAME_QUALITY = 0.82;                    // 與 thumbs.js 的縮圖品質一致
 const FRAME_AT = 2;                            // 目標秒數（會被片長壓縮，見 frameTime）
@@ -67,11 +72,17 @@ function videoSiblingCover(app, file) {
   return null;
 }
 
-/** 值不值得抽首幀（影片 + 大小在上限內）。太大就維持圖示卡。 */
+/** 這台裝置的預設讀檔上限（bytes）。 */
+function deviceMaxSourceBytes() {
+  const mb = document.body.classList.contains('is-mobile') ? MAX_SOURCE_MB_MOBILE : MAX_SOURCE_MB_DESKTOP;
+  return mb * 1024 * 1024;
+}
+
+/** 值不值得抽首幀（影片 + 大小在裝置上限內）。太大就維持圖示卡。 */
 function shouldGrabVideoFrame(file) {
   if (!isVideoFile(file)) return false;
   const size = (file.stat && file.stat.size) || 0;
-  return size > 0 && size <= MAX_SOURCE_BYTES;
+  return size > 0 && size <= deviceMaxSourceBytes();
 }
 
 /** 只等一個事件（含 error 與逾時），成功 resolve、否則 reject。 */
@@ -196,5 +207,6 @@ module.exports = {
   videoSiblingCover,
   shouldGrabVideoFrame,
   grabVideoFrame,
-  MAX_SOURCE_BYTES,
+  MAX_SOURCE_MB_DESKTOP,
+  MAX_SOURCE_MB_MOBILE,
 };
