@@ -4599,7 +4599,6 @@ class GalleryView extends ItemView {
     if (this._tagIndexCache && !this._tagDirty) return this._tagIndexCache;
     const map = new Map();     // 'a/b' -> Set<TFile>
     const untagged = [];
-    const literal = new Set(); // 真的有檔案直接持有的標籤（map 的 key 含祖先前綴，不能拿來當候選）
     /* 2026-11-16：非 md（圖片 / PDF / Canvas…）也納入。它們沒有 frontmatter，
        標籤來自 state.assetTags，由 tagsOfFile() 統一取得。 */
     for (const f of this.app.vault.getFiles()) {
@@ -4610,7 +4609,6 @@ class GalleryView extends ItemView {
       for (const t of tags) {
         const clean = String(t).replace(/^#/, '');
         if (!clean) continue;
-        literal.add(clean);
         let acc = '';
         for (const seg of clean.split('/')) {
           acc = acc ? acc + '/' + seg : seg;
@@ -4622,7 +4620,7 @@ class GalleryView extends ItemView {
       }
     }
     this._tagDirty = false;
-    this._tagIndexCache = { map, untagged, literal };
+    this._tagIndexCache = { map, untagged };
     return this._tagIndexCache;
   }
 
@@ -4643,54 +4641,13 @@ class GalleryView extends ItemView {
     this._folderTagsCache = null;
   }
 
-  // 非 md：直接改 state.assetTags；回傳「這次有沒有真的加上」
-  assetTagsAdd(file, tag) {
-    const st = this.plugin.state;
-    const map = st.assetTags || (st.assetTags = {});
-    const cur = new Set((map[file.path] || []).map(normalizeTag).filter(Boolean));
-    // 標籤比對不分大小寫（顯示保留原本輸入），避免同時出現 #Travel 與 #travel
-    if ([...cur].some((x) => x.toLowerCase() === tag.toLowerCase())) return false;
-    cur.add(tag);
-    map[file.path] = [...cur];
-    return true;
-  }
-
-  assetTagsRemove(file, tag) {
-    const st = this.plugin.state;
-    const map = st.assetTags || (st.assetTags = {});
-    const cur = (map[file.path] || []).map(normalizeTag).filter(Boolean);
-    const want = tag.toLowerCase();
-    if (!cur.some((x) => x.toLowerCase() === want)) return false;
-    const next = cur.filter((x) => x.toLowerCase() !== want);
-    if (next.length) map[file.path] = next;
-    else delete map[file.path];
-    return true;
-  }
-
-  /* 統一的「加標籤」底層（不跳 Notice，批次流程要自己彙總）。
-     md → frontmatter；其他檔型 → state.assetTags。
-     ⚠️ 官方 processFrontMatter 對非 md 是 no-op（不是丟錯），
-        以前拖圖片到標籤列會誤報「已有該標籤」就是這樣來的。 */
-  async addTagToFile(file, tag) {
-    tag = normalizeTag(tag);
-    if (!tag) return false;
-    if (file.extension !== 'md') {
-      const added = this.assetTagsAdd(file, tag);
-      if (added) this.plugin.saveState();
-      return added;
-    }
-    let added = false;
-    await this.app.fileManager.processFrontMatter(file, (fm) => {
-      let tags = fm.tags;
-      if (!tags) tags = [];
-      else if (typeof tags === 'string') tags = tags.split(/[,\s]+/).filter(Boolean);
-      else tags = [...tags];
-      const clean = tags.map((x) => String(x).replace(/^#/, ''));
-      if (!clean.includes(tag)) { clean.push(tag); added = true; }
-      fm.tags = clean;
-    });
-    return added;
-  }
+  /* 標籤的新增／移除／選擇器都在 plugin（見 GalleryPlugin 的 addTagToFile）：
+     畫廊卡片、拖放、原生檔案選單共用同一份，選單不必先開著畫廊才能用。
+     這裡只留轉呼叫，視圖內的呼叫端不必改。 */
+  addTagToFile(file, tag) { return this.plugin.addTagToFile(file, tag); }
+  removeTagFromFile(file, tag) { return this.plugin.removeTagFromFile(file, tag); }
+  refreshAfterTagChange(files) { return this.plugin.refreshAfterTagChange(files); }
+  openTagPicker(files) { this.plugin.openTagPicker(files); }
 
   async addTagToNote(file, tag) {
     try {
@@ -4701,52 +4658,6 @@ class GalleryView extends ItemView {
       if (added) this.refreshAfterTagChange([file]);
     } catch (e) {
       new Notice(t('Failed to add tag: {{msg}}', { msg: e && e.message ? e.message : e }));
-    }
-  }
-
-  /* 開啟標籤選擇器。單張卡＝該檔案的完整標籤；多選＝只顯示「所有選取檔案都有的」
-     標籤，避免把只存在於部分檔案的標籤誤刪掉。 */
-  openTagPicker(files) {
-    const targets = (files || []).filter((f) => f instanceof TFile);
-    if (!targets.length) return;
-    const idx = this.buildTagIndex();
-    /* 候選只列「真的有檔案持有」的標籤。map 的 key 含祖先前綴
-       （檔案有 design/font 就會有 design），勾選那種前綴會寫入一個字面標籤。 */
-    const all = [...(idx.literal || new Set())].sort((a, b) => a.localeCompare(b));
-    const each = targets.map((f) => new Set(
-      tagsOfFile(this.app, this.plugin.state, f).map(normalizeTag).filter(Boolean)));
-    const common = new Set([...each[0]].filter((tag) => each.every((s) => s.has(tag))));
-    new TagPickerModal(this.app, common, all, (selected) =>
-      this.applyTagSelection(targets, common, selected)).open();
-  }
-
-  /* 標籤寫入後重畫。md 的 metadataCache 是非同步更新的，立刻重建索引
-     有可能讀到舊的 frontmatter → 標籤樹看起來沒更新；延後一點再刷新。
-     非 md 的 assetTags 是同步的，立刻刷新即可。 */
-  refreshAfterTagChange(files) {
-    const hasMd = (files || []).some((f) => f && f.extension === 'md');
-    if (hasMd) setTimeout(() => this.plugin.tagsChanged(), 250);
-    else this.plugin.tagsChanged();
-  }
-
-  // 把選擇器的結果套到每個目標：只處理「相對初始狀態的變化」，
-  // 這樣多選時不會去動那些只存在於部分檔案的標籤。
-  async applyTagSelection(targets, initial, selected) {
-    let added = 0, removed = 0;
-    for (const f of targets) {
-      for (const tag of selected) {
-        if (initial.has(tag)) continue;
-        try { if (await this.addTagToFile(f, tag)) added++; } catch (e) {}
-      }
-      for (const tag of initial) {
-        if (selected.has(tag)) continue;
-        try { if (await this.removeTagFromFile(f, tag)) removed++; } catch (e) {}
-      }
-    }
-    if (added || removed) {
-      this.plugin.saveState();
-      this.refreshAfterTagChange(targets);
-      new Notice(t('Updated tags on {{n}} file(s)', { n: targets.length }));
     }
   }
 
@@ -4902,28 +4813,6 @@ class GalleryView extends ItemView {
     new Notice(t('Deleted #{{tag}} from {{n}} file(s)', { tag: tagPath, n: changed }));
     if (this.plugin.state.activeTag === tagPath) { this.plugin.state.activeTag = ''; this.plugin.saveState(); }
     this.render();
-  }
-
-  // 統一的「移除標籤」底層（不跳 Notice）；md 只動 frontmatter，內文行內標籤不動。
-  async removeTagFromFile(file, tag) {
-    tag = normalizeTag(tag);
-    if (!tag) return false;
-    if (file.extension !== 'md') {
-      const removed = this.assetTagsRemove(file, tag);
-      if (removed) this.plugin.saveState();
-      return removed;
-    }
-    let removed = false;
-    await this.app.fileManager.processFrontMatter(file, (fm) => {
-      let tags = fm.tags;
-      if (!tags) return;
-      if (typeof tags === 'string') tags = tags.split(/[,\s]+/).filter(Boolean);
-      else tags = [...tags];
-      const clean = tags.map((x) => String(x).replace(/^#/, ''));
-      const next = clean.filter((x) => x !== tag);
-      if (next.length !== clean.length) { removed = true; fm.tags = next; }
-    });
-    return removed;
   }
 
   // 卡片右鍵「移除 #tag」；限制同前：內文行內標籤不動。
@@ -7182,7 +7071,11 @@ class GalleryPlugin extends Plugin {
           .onClick(() => { try { this.peek.open(img); } catch (e) {} }));
       }
 
-      // ③ 交換圖片：要改寫來源筆記，所以必須確定「這張圖真的被目前這篇引用」——
+      // ③ 標籤：圖片沒有原生標籤入口。走 plugin 的選擇器，不依賴畫廊是否開著。
+      menu.addItem((i) => i.setTitle(t('Tags…')).setIcon('tags')
+        .onClick(() => this.openTagPicker([file])));
+
+      // ④ 交換圖片：要改寫來源筆記，所以必須確定「這張圖真的被目前這篇引用」——
       //    否則在檔案總管右鍵時會去改到一篇不相干的筆記。
       if (note && note.extension === 'md' && this.noteEmbeds(note, file)) {
         menu.addItem((i) => i.setTitle(t('Swap image…')).setIcon('image-plus')
@@ -7379,6 +7272,126 @@ class GalleryPlugin extends Plugin {
       new Notice(t('Image copied'));
     } catch (e) {
       new Notice(t('Failed to copy image: {{msg}}', { msg: e && e.message ? e.message : e }));
+    }
+  }
+
+  /* ===== 檔案標籤的新增／移除／選擇器（畫廊與原生檔案選單共用）=====
+     非 md 沒有原生標籤：md 走 frontmatter，其餘寫 state.assetTags。
+     ⚠️ 官方 processFrontMatter 對非 md 是 no-op（不是丟錯），
+        以前拖圖片到標籤列會誤報「已有該標籤」就是這樣來的。 */
+  assetTagsAdd(file, tag) {
+    const map = this.state.assetTags || (this.state.assetTags = {});
+    const cur = new Set((map[file.path] || []).map(normalizeTag).filter(Boolean));
+    // 標籤比對不分大小寫（顯示保留原本輸入），避免同時出現 #Travel 與 #travel
+    if ([...cur].some((x) => x.toLowerCase() === tag.toLowerCase())) return false;
+    cur.add(tag);
+    map[file.path] = [...cur];
+    return true;
+  }
+
+  assetTagsRemove(file, tag) {
+    const map = this.state.assetTags || (this.state.assetTags = {});
+    const cur = (map[file.path] || []).map(normalizeTag).filter(Boolean);
+    const want = tag.toLowerCase();
+    if (!cur.some((x) => x.toLowerCase() === want)) return false;
+    const next = cur.filter((x) => x.toLowerCase() !== want);
+    if (next.length) map[file.path] = next;
+    else delete map[file.path];
+    return true;
+  }
+
+  // 統一的「加標籤」底層（不跳 Notice，批次流程自己彙總）
+  async addTagToFile(file, tag) {
+    tag = normalizeTag(tag);
+    if (!tag) return false;
+    if (file.extension !== 'md') {
+      const added = this.assetTagsAdd(file, tag);
+      if (added) this.saveState();
+      return added;
+    }
+    let added = false;
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      let tags = fm.tags;
+      if (!tags) tags = [];
+      else if (typeof tags === 'string') tags = tags.split(/[,\s]+/).filter(Boolean);
+      else tags = [...tags];
+      const clean = tags.map((x) => String(x).replace(/^#/, ''));
+      if (!clean.includes(tag)) { clean.push(tag); added = true; }
+      fm.tags = clean;
+    });
+    return added;
+  }
+
+  // 統一的「移除標籤」底層；md 只動 frontmatter，內文行內標籤不動
+  async removeTagFromFile(file, tag) {
+    tag = normalizeTag(tag);
+    if (!tag) return false;
+    if (file.extension !== 'md') {
+      const removed = this.assetTagsRemove(file, tag);
+      if (removed) this.saveState();
+      return removed;
+    }
+    let removed = false;
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      let tags = fm.tags;
+      if (!tags) return;
+      if (typeof tags === 'string') tags = tags.split(/[,\s]+/).filter(Boolean);
+      else tags = [...tags];
+      const clean = tags.map((x) => String(x).replace(/^#/, ''));
+      const next = clean.filter((x) => x !== tag);
+      if (next.length !== clean.length) { removed = true; fm.tags = next; }
+    });
+    return removed;
+  }
+
+  /* 標籤寫入後重畫。md 的 metadataCache 是非同步更新的，立刻重建索引
+     有可能讀到舊的 frontmatter → 標籤樹看起來沒更新；延後一點再刷新。
+     非 md 的 assetTags 是同步的，立刻刷新即可。 */
+  refreshAfterTagChange(files) {
+    const hasMd = (files || []).some((f) => f && f.extension === 'md');
+    if (hasMd) setTimeout(() => this.tagsChanged(), 250);
+    else this.tagsChanged();
+  }
+
+  /* 開啟標籤選擇器。單張＝該檔案的全部標籤；多選＝只顯示「所有選取檔案都有的」，
+     避免把只存在於部分檔案的標籤誤刪掉。 */
+  openTagPicker(files) {
+    const targets = (files || []).filter((f) => f instanceof TFile);
+    if (!targets.length) return;
+    /* 候選直接掃「真的有檔案持有」的標籤：索引的 key 含祖先前綴
+       （檔案有 design/font 就會有 design），勾選那種前綴會寫入一個字面標籤。 */
+    const all = new Set();
+    for (const f of this.app.vault.getFiles()) {
+      for (const tg of tagsOfFile(this.app, this.state, f)) {
+        const c = normalizeTag(tg);
+        if (c) all.add(c);
+      }
+    }
+    const each = targets.map((f) => new Set(
+      tagsOfFile(this.app, this.state, f).map(normalizeTag).filter(Boolean)));
+    const common = new Set([...each[0]].filter((tag) => each.every((s) => s.has(tag))));
+    new TagPickerModal(this.app, common, [...all].sort((a, b) => a.localeCompare(b)), (selected) =>
+      this.applyTagSelection(targets, common, selected)).open();
+  }
+
+  // 把選擇器的結果套到每個目標：只處理「相對初始狀態的變化」，
+  // 這樣多選時不會去動那些只存在於部分檔案的標籤。
+  async applyTagSelection(targets, initial, selected) {
+    let added = 0, removed = 0;
+    for (const f of targets) {
+      for (const tag of selected) {
+        if (initial.has(tag)) continue;
+        try { if (await this.addTagToFile(f, tag)) added++; } catch (e) {}
+      }
+      for (const tag of initial) {
+        if (selected.has(tag)) continue;
+        try { if (await this.removeTagFromFile(f, tag)) removed++; } catch (e) {}
+      }
+    }
+    if (added || removed) {
+      this.saveState();
+      this.refreshAfterTagChange(targets);
+      new Notice(t('Updated tags on {{n}} file(s)', { n: targets.length }));
     }
   }
 
