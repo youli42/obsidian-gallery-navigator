@@ -86,13 +86,14 @@ function mergeObject(base, local, remote) {
 /* 標籤是「集合」不是「值」：同一張圖在兩台裝置各加一個標籤時，
    整段陣列用本地覆蓋會丟掉另一邊的標籤。這裡做真正的三方集合合併：
      · 只有一邊相對 base 有變化 → 套用那一邊（含刪除）
-     · 兩邊都有變化 → 兩邊都有的留下；一邊新增、一邊刪除 → 保留新增（寧可多不可少）
-   標籤正規化（去 #、去空白、去重、排序）也在這裡做，避免 'a' 與 '#a' 被當成兩個。 */
-function tagSetOf(v) {
-  const out = new Set();
+     · 兩邊都有變化 → 兩邊都有的留下
+   標籤正規化（去 #、去空白、排序）也在這裡做，避免 'a' 與 '#a' 被當成兩個。
+   大小寫視為同一個標籤（與 assetTagsAdd 的去重一致），顯示保留本機寫法。 */
+function tagMapOf(v, into) {
+  const out = into || new Map();          // lower-case → 原始寫法
   for (const x of (Array.isArray(v) ? v : [])) {
     const s = String(x == null ? '' : x).replace(/^#/, '').trim();
-    if (s) out.add(s);
+    if (s && !out.has(s.toLowerCase())) out.set(s.toLowerCase(), s);
   }
   return out;
 }
@@ -104,18 +105,21 @@ function mergeTagMap(base, local, remote) {
   const out = {};
   const paths = new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(remote)]);
   for (const p of paths) {
-    const b = tagSetOf(base[p]), l = tagSetOf(local[p]), r = tagSetOf(remote[p]);
-    const keep = new Set();
-    for (const tag of new Set([...b, ...l, ...r])) {
+    const b = tagMapOf(base[p]), l = tagMapOf(local[p]), r = tagMapOf(remote[p]);
+    const keep = new Map();
+    for (const tag of new Set([...b.keys(), ...l.keys(), ...r.keys()])) {
       const inB = b.has(tag), inL = l.has(tag), inR = r.has(tag);
       const localChanged = inL !== inB;
       const remoteChanged = inR !== inB;
-      if (localChanged && remoteChanged) { if (inL || inR) keep.add(tag); }
-      else if (localChanged) { if (inL) keep.add(tag); }
-      else if (remoteChanged) { if (inR) keep.add(tag); }
-      else if (inL) keep.add(tag);
+      let take = false;
+      if (localChanged && remoteChanged) take = inL || inR;
+      else if (localChanged) take = inL;
+      else if (remoteChanged) take = inR;
+      else take = inL;
+      // 顯示寫法：本機 > base > 遠端
+      if (take) keep.set(tag, l.get(tag) || b.get(tag) || r.get(tag));
     }
-    if (keep.size) out[p] = [...keep].sort();
+    if (keep.size) out[p] = [...keep.values()].sort((x, y) => x.localeCompare(y));
   }
   return out;
 }

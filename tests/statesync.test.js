@@ -137,6 +137,13 @@ const ok = (name) => { console.log('  ✓ ' + name); n++; };
   ok('assetTags：正規化與去重');
 }
 
+// 情境 12b：大小寫不同的同一個標籤 → 只留一個，顯示用本機寫法
+{
+  const m = mergeShared({}, { assetTags: { 'a.jpg': ['Travel'] } }, { assetTags: { 'a.jpg': ['travel'] } });
+  assert.deepStrictEqual(m.merged.assetTags['a.jpg'], ['Travel']);
+  ok('assetTags：大小寫視為同一標籤');
+}
+
 // 情境 13：磁碟上的 assetTags 是空物件（另一台還沒同步到這個欄位）→ 不可清空本機標籤
 {
   const base = { assetTags: { 'a.jpg': ['travel'] } };
