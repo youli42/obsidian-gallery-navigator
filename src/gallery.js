@@ -4599,6 +4599,7 @@ class GalleryView extends ItemView {
     if (this._tagIndexCache && !this._tagDirty) return this._tagIndexCache;
     const map = new Map();     // 'a/b' -> Set<TFile>
     const untagged = [];
+    const literal = new Set(); // 真的有檔案直接持有的標籤（map 的 key 含祖先前綴，不能拿來當候選）
     /* 2026-11-16：非 md（圖片 / PDF / Canvas…）也納入。它們沒有 frontmatter，
        標籤來自 state.assetTags，由 tagsOfFile() 統一取得。 */
     for (const f of this.app.vault.getFiles()) {
@@ -4609,6 +4610,7 @@ class GalleryView extends ItemView {
       for (const t of tags) {
         const clean = String(t).replace(/^#/, '');
         if (!clean) continue;
+        literal.add(clean);
         let acc = '';
         for (const seg of clean.split('/')) {
           acc = acc ? acc + '/' + seg : seg;
@@ -4620,7 +4622,7 @@ class GalleryView extends ItemView {
       }
     }
     this._tagDirty = false;
-    this._tagIndexCache = { map, untagged };
+    this._tagIndexCache = { map, untagged, literal };
     return this._tagIndexCache;
   }
 
@@ -4708,7 +4710,9 @@ class GalleryView extends ItemView {
     const targets = (files || []).filter((f) => f instanceof TFile);
     if (!targets.length) return;
     const idx = this.buildTagIndex();
-    const all = [...idx.map.keys()].sort((a, b) => a.localeCompare(b));
+    /* 候選只列「真的有檔案持有」的標籤。map 的 key 含祖先前綴
+       （檔案有 design/font 就會有 design），勾選那種前綴會寫入一個字面標籤。 */
+    const all = [...(idx.literal || new Set())].sort((a, b) => a.localeCompare(b));
     const each = targets.map((f) => new Set(
       tagsOfFile(this.app, this.plugin.state, f).map(normalizeTag).filter(Boolean)));
     const common = new Set([...each[0]].filter((tag) => each.every((s) => s.has(tag))));
