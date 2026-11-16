@@ -1,6 +1,6 @@
 {
   "name": "gallery-navigator",
-  "version": "0.5.2-zh.1",
+  "version": "0.5.3-youli",
   "description": "Visual vault navigator: folder/tag tree with a cover-image card wall, full-text search (including PDFs), image quick-look, and link preview cards.",
   "main": "main.js",
   "scripts": {
