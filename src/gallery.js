@@ -3042,9 +3042,10 @@ class GalleryView extends ItemView {
     if (this.plugin.coverCache) {
       try { url = await this.plugin.coverCache.set(file, frame.bytes, 'jpg'); } catch (e) { url = null; }
     }
-    /* 寫不進去就不記負快取：下次進視野再試（配額可能已經鬆一點了）。
-       成功才記住資源路徑。 */
-    return url ? save(url) : null;
+    /* 寫不進共用快取（配額滿、目錄不可寫）→ 這台裝置這次就維持圖示卡。
+       這裡必須記負快取：卡片重畫時會再問一次，不記就等於重讀整檔、重解碼一次，
+       而「寫不進去」幾乎不會自己好。檔案被改（mtime 變）或重開 Obsidian 才會再試。 */
+    return save(url || null);
   }
 
   /** Excalidraw 繪圖存檔 → 重排已掛載的卡片（由 plugin.xcalFileChanged 呼叫）。
