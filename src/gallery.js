@@ -10,7 +10,7 @@ const { Plugin, ItemView, MarkdownView, TFolder, TFile, Menu, FuzzySuggestModal,
 const { t, setLang, isZh } = require('./i18n.js');
 const { ThumbCache } = require('./thumbs.js');
 const { CoverCache, DEFAULT_MB_DESKTOP, DEFAULT_MB_MOBILE, MIN_MB, MAX_MB } = require('./covercache.js');
-const { VIDEO_EXT, videoSiblingCover, shouldGrabVideoFrame, grabVideoFrame } = require('./videocover.js');
+const { VIDEO_EXT, videoSiblingCover, shouldGrabVideoFrame, grabVideoFrame, MAX_SOURCE_MB_DESKTOP, MAX_SOURCE_MB_MOBILE, MIN_MAX_SOURCE_MB, MAX_MAX_SOURCE_MB } = require('./videocover.js');
 const { DimPrefetcher } = require('./dims.js');
 const { setupCanvasImageToNote } = require('./canvasnote.js');
 const { VirtualWall } = require('./virtual.js');
@@ -3036,7 +3036,7 @@ class GalleryView extends ItemView {
     /* 排隊期間可能已經被刪掉／改名 → 抽了也是白抽（而且會拖住閘門）。 */
     if (!(this.app.vault.getAbstractFileByPath(file.path) instanceof TFile)) return save(null);
     let frame = null;
-    try { frame = await grabVideoFrame(this.app, file); } catch (e) { frame = null; }
+    try { frame = await grabVideoFrame(this.app, file, { maxMB: this.plugin.videoCoverMaxMB() }); } catch (e) { frame = null; }
     if (!frame || !frame.bytes || !frame.bytes.byteLength) return save(null);   // 解碼失敗：本階段不再重試
     let url = null;
     if (this.plugin.coverCache) {
@@ -5703,7 +5703,7 @@ class GalleryView extends ItemView {
         card._pdfFile = it.file; card._pdfPh = ph;
         // 高度已按縮圖的長寬比估 → 縮圖進來前先別量（見 cardSettled）
         if ((this.plugin._dimIndex || {})[this.lateDimKeyOf(it)]) card._lateImg = true;
-      } else if (it.isVideo && this.plugin.state.videoCovers !== false && shouldGrabVideoFrame(it.file)) {
+      } else if (it.isVideo && this.plugin.state.videoCovers !== false && shouldGrabVideoFrame(it.file, this.plugin.videoCoverMaxMB())) {
         /* 影片：先掛檔型圖示，捲進視野再抽首幀（loadVideoCover）。
            有同名封面圖的影片在 it.src 分支就處理掉了（使用者自己指定封面 → 照他的）。
            太大／型別不支援的影片在 shouldGrabVideoFrame 就擋掉，維持圖示卡。 */
@@ -6312,6 +6312,29 @@ class GallerySettingTab extends PluginSettingTab {
       .setDesc(t('Video cards show a first-frame cover, or a same-name image next to the file (clip.mp4 + clip.jpg / clip.cover.jpg). Frames are extracted in the background, only for cards on screen, and share the cover cache below. Turn off if folders full of large videos feel slow.'))
       .addToggle((tg) => tg.setValue(st.videoCovers !== false)
         .onChange((v) => { st.videoCovers = v; save(); this.plugin.refreshViews(); }));
+
+    /* 抽幀上限（2026-11-16）：存在本機（statesync.js 的 LOCAL_KEYS），桌機與手機各記各的 ——
+       手機的預設值要比桌機小得多，同一個數字套到兩邊都不對。
+       為什麼要有這個設定：抽幀是「把整個檔案讀進記憶體再解碼」，峰值約是檔案大小的兩倍，
+       大影片很多的資料夾會直接把手機的記憶體吃光（見 videocover.js 的說明）。 */
+    const defaultVideoMB = () => (document.body.classList.contains('is-mobile') ? MAX_SOURCE_MB_MOBILE : MAX_SOURCE_MB_DESKTOP);
+    new Setting(containerEl)
+      .setName(t('Video cover size limit'))
+      .setDesc(t('Videos larger than this are not decoded for a cover; the card keeps its file-type icon. The value is per device (phone and desktop each keep their own), because decoding loads the whole file into memory — roughly twice its size.'))
+      .addText((tx) => {
+        tx.inputEl.type = 'number';
+        tx.inputEl.min = String(MIN_MAX_SOURCE_MB);
+        tx.inputEl.max = String(MAX_MAX_SOURCE_MB);
+        tx.setPlaceholder(String(defaultVideoMB()));
+        tx.setValue(String(st.videoCoverMaxMB || defaultVideoMB()));
+        tx.onChange((v) => {
+          const n = Math.round(Number(v));
+          /* 清空或亂填 → 回到這台裝置的預設值（存 0），不要卡在一個不能用的數字上。 */
+          if (!Number.isFinite(n) || n <= 0) { st.videoCoverMaxMB = 0; save(); return; }
+          st.videoCoverMaxMB = Math.min(MAX_MAX_SOURCE_MB, Math.max(MIN_MAX_SOURCE_MB, n));
+          save();
+        });
+      });
 
     /* 縮圖落盤快取（2026-11-16）：Excalidraw 繪圖縮圖與影片首幀**共用同一個池**——
        都放在 cover-cache/，共用一份位元組預算與 LRU。之後再加別的封面來源
@@ -7021,7 +7044,7 @@ class GalleryPlugin extends Plugin {
        本機那份優先；升級後第一次執行還沒有 → 沿用 data.json 裡的（以前都存在那裡）。 */
     const disk = (await this.loadData()) || {};
     const localSaved = this.loadLocalState();
-    this.state = Object.assign({ lastPath: '', cardWidth: 120, sort: 'new', folderOrder: {}, hiddenFolders: [], folderColors: {}, expandedFolders: [], treeWidth: 232, treeCollapsed: false, syncActive: true, leftMode: 'folder', activeTag: '', expandedTags: [], cardColors: {}, noPreviewFolders: [], folderLayouts: {}, favorites: [], pinnedCards: [], assetTags: {}, lang: '', openUnfocused: true, imageCardLayout: 'stacked', autoCardColor: false, excalidrawThumbs: true, videoCovers: true, coverCacheMB: 0 }, disk, localSaved ? splitState(localSaved).local : null);
+    this.state = Object.assign({ lastPath: '', cardWidth: 120, sort: 'new', folderOrder: {}, hiddenFolders: [], folderColors: {}, expandedFolders: [], treeWidth: 232, treeCollapsed: false, syncActive: true, leftMode: 'folder', activeTag: '', expandedTags: [], cardColors: {}, noPreviewFolders: [], folderLayouts: {}, favorites: [], pinnedCards: [], assetTags: {}, lang: '', openUnfocused: true, imageCardLayout: 'stacked', autoCardColor: false, excalidrawThumbs: true, videoCovers: true, videoCoverMaxMB: 0, coverCacheMB: 0 }, disk, localSaved ? splitState(localSaved).local : null);
     // 三方合併的基準：上次看到的磁碟內容（只含共用設定）
     this._syncBase = splitState(disk).shared;
 
@@ -8192,6 +8215,14 @@ class GalleryPlugin extends Plugin {
     pend.set(f.path, f);
     clearTimeout(this._xcalPendT);
     this._xcalPendT = setTimeout(() => this._flushXcalPending(), 600);
+  }
+
+  /* 抽幀讀檔上限（MB，0＝沒設定 → 用這台裝置的預設值）。
+     存在本機（statesync.js 的 LOCAL_KEYS）：手機的預設值必須比桌機小得多，
+     同一個數字套到兩邊都不對。卡片判斷與實際抽幀兩邊都走這裡，數字才會一致。 */
+  videoCoverMaxMB() {
+    const v = Number(this.state && this.state.videoCoverMaxMB);
+    return Number.isFinite(v) && v > 0 ? v : 0;
   }
 
   /* 影片檔被替換（vault 'modify'）→ 封面要重抽。

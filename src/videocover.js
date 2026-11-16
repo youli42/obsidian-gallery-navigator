@@ -72,17 +72,27 @@ function videoSiblingCover(app, file) {
   return null;
 }
 
+/* 設定頁允許的範圍（MB）。上限開得再大也不會更快：讀整檔解碼的量體就在那裡。 */
+const MIN_MAX_SOURCE_MB = 5;
+const MAX_MAX_SOURCE_MB = 300;
+
 /** 這台裝置的預設讀檔上限（bytes）。 */
 function deviceMaxSourceBytes() {
   const mb = document.body.classList.contains('is-mobile') ? MAX_SOURCE_MB_MOBILE : MAX_SOURCE_MB_DESKTOP;
   return mb * 1024 * 1024;
 }
 
-/** 值不值得抽首幀（影片 + 大小在裝置上限內）。太大就維持圖示卡。 */
-function shouldGrabVideoFrame(file) {
+/** 上限（bytes）：設定頁有值就用它（0／未設定＝這台裝置的預設）。 */
+function maxSourceBytes(maxMB) {
+  const mb = Number(maxMB);
+  return Number.isFinite(mb) && mb > 0 ? mb * 1024 * 1024 : deviceMaxSourceBytes();
+}
+
+/** 值不值得抽首幀（影片 + 大小在上限內）。太大就維持圖示卡。 */
+function shouldGrabVideoFrame(file, maxMB) {
   if (!isVideoFile(file)) return false;
   const size = (file.stat && file.stat.size) || 0;
-  return size > 0 && size <= deviceMaxSourceBytes();
+  return size > 0 && size <= maxSourceBytes(maxMB);
 }
 
 /** 只等一個事件（含 error 與逾時），成功 resolve、否則 reject。 */
@@ -137,7 +147,7 @@ function nearlyBlack(ctx, w, h) {
  */
 async function grabVideoFrame(app, file, opt) {
   const opts = opt || {};
-  if (!shouldGrabVideoFrame(file)) return null;
+  if (!shouldGrabVideoFrame(file, opts.maxMB)) return null;
 
   const ext = (file.extension || '').toLowerCase();
   const type = MIME_BY_EXT[ext] || '';
@@ -209,4 +219,6 @@ module.exports = {
   grabVideoFrame,
   MAX_SOURCE_MB_DESKTOP,
   MAX_SOURCE_MB_MOBILE,
+  MIN_MAX_SOURCE_MB,
+  MAX_MAX_SOURCE_MB,
 };
