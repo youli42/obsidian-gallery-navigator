@@ -144,14 +144,23 @@ const ok = (name) => { console.log('  ✓ ' + name); n++; };
   ok('assetTags：大小寫視為同一標籤');
 }
 
-// 情境 13：磁碟上的 assetTags 是空物件（另一台還沒同步到這個欄位）→ 不可清空本機標籤
+// 情境 13：從未同步過（base 也空）、磁碟上是空物件 → 當成另一台還沒同步到，保留本機
+{
+  const local = { assetTags: { 'a.jpg': ['travel'] } };
+  const disk = { assetTags: {} };
+  const m = mergeShared({}, local, disk);
+  assert.deepStrictEqual(m.merged.assetTags, { 'a.jpg': ['travel'] });
+  ok('assetTags：升級後第一次同步不會誤清本機標籤');
+}
+
+// 情境 14：已經同步過（base 非空）→ 磁碟變空就是對方清空了，要採納（不可復活）
 {
   const base = { assetTags: { 'a.jpg': ['travel'] } };
-  const local = { assetTags: { 'a.jpg': ['travel', 'family'] } };
+  const local = { assetTags: { 'a.jpg': ['travel'] } };
   const disk = { assetTags: {} };
   const m = mergeShared(base, local, disk);
-  assert.deepStrictEqual(m.merged.assetTags, { 'a.jpg': ['travel', 'family'] });
-  ok('assetTags：遠端空物件不會誤清本機標籤');
+  assert.deepStrictEqual(m.merged.assetTags, {});
+  ok('assetTags：另一台清空後不會被本機復活');
 }
 
 // （data.json 是個人資料、不進 repo；不存在就略過這一項）

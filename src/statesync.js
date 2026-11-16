@@ -148,13 +148,13 @@ function mergeShared(base, local, remote) {
     const b = base[k];
     if (k === 'assetTags') {
       /* 檔案標籤用集合合併，避免兩台各加一個標籤時互相覆蓋。
-         另外：磁碟上是空物件、本機或 base 卻有標籤時，當成「另一台還沒同步到
-         這個欄位」而不是「對方把所有標籤刪光了」—— 整包清空的代價太高，
-         寧可保守保留。真要清空請逐檔移除。 */
+         空物件的判讀只在「base 也還是空」時保守 —— 那是升級後第一次同步，
+         別台很可能還不認得這個欄位。一旦同步過（base 非空），遠端變空就是
+         對方真的清空了，要照樣採納；否則清空會被這台一直復活。 */
+      const baseEmpty = !isPlainObject(b) || !Object.keys(b).length;
       const remoteEmpty = !isPlainObject(remote[k]) || !Object.keys(remote[k]).length;
-      const keepLocal = remoteEmpty && (
-        (isPlainObject(local[k]) && Object.keys(local[k]).length) ||
-        (isPlainObject(b) && Object.keys(b).length));
+      const keepLocal = remoteEmpty && baseEmpty &&
+        isPlainObject(local[k]) && Object.keys(local[k]).length;
       merged[k] = keepLocal ? clone(local[k]) : mergeTagMap(b || {}, local[k], remote[k]);
     } else if (isPlainObject(local[k]) && isPlainObject(remote[k]) && (b === undefined || isPlainObject(b))) {
       merged[k] = mergeObject(b || {}, local[k], remote[k]);
