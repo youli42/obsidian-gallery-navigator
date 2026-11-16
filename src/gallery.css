@@ -979,6 +979,37 @@ body:not(.is-mobile) .gn-card.gn-has-img .gn-fileicon { min-height: 56.25cqw; } 
    交出去之後，這個輸入框就跟該主題其他輸入框長得一樣。 */
 .gn-input { width: 100%; }
 
+/* 標籤選擇器（TagPickerModal）：清單固定高度，長標籤清單也不會把對話框撐爆 */
+.gn-tagpick-list {
+  margin-top: 8px; max-height: 46vh; overflow-y: auto;
+  border-radius: 8px; background: var(--background-secondary);
+  padding: 4px 6px;
+}
+.gn-tagpick-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 6px; border-radius: 6px; cursor: pointer;
+  font-size: 13px; line-height: 1.4;
+}
+.gn-tagpick-row:hover { background: var(--background-modifier-hover); }
+.gn-tagpick-row.is-on { color: var(--text-accent); }
+.gn-tagpick-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gn-tagpick-create { color: var(--text-accent); font-weight: 600; }
+
+/* 卡片標籤徽章：絕對定位，不影響卡片高度（避免瀑布流重排） */
+.gn-card-tagbadge {
+  position: absolute; top: 6px; left: 6px; z-index: 3;
+  display: flex; align-items: center; justify-content: center;
+  min-width: 22px; height: 18px; padding: 0 5px;
+  border-radius: 999px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: 10px; font-weight: 600; line-height: 1;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer; opacity: 0.88;
+}
+.gn-card-tagbadge:hover { opacity: 1; color: var(--text-accent); }
+
 /* 手機 / 窄側欄 */
 /* 手機：方案⑤「並排雙欄一起平移」（2026-07-15）
    左欄 86% + 右欄 100% 並排在 overflow:hidden 的 split 裡；切換＝兩欄「一起」translateX。

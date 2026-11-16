@@ -83,6 +83,43 @@ function mergeObject(base, local, remote) {
   return out;
 }
 
+/* 標籤是「集合」不是「值」：同一張圖在兩台裝置各加一個標籤時，
+   整段陣列用本地覆蓋會丟掉另一邊的標籤。這裡做真正的三方集合合併：
+     · 只有一邊相對 base 有變化 → 套用那一邊（含刪除）
+     · 兩邊都有變化 → 兩邊都有的留下；一邊新增、一邊刪除 → 保留新增（寧可多不可少）
+   標籤正規化（去 #、去空白、去重、排序）也在這裡做，避免 'a' 與 '#a' 被當成兩個。 */
+function tagSetOf(v) {
+  const out = new Set();
+  for (const x of (Array.isArray(v) ? v : [])) {
+    const s = String(x == null ? '' : x).replace(/^#/, '').trim();
+    if (s) out.add(s);
+  }
+  return out;
+}
+
+function mergeTagMap(base, local, remote) {
+  base = isPlainObject(base) ? base : {};
+  local = isPlainObject(local) ? local : {};
+  remote = isPlainObject(remote) ? remote : {};
+  const out = {};
+  const paths = new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(remote)]);
+  for (const p of paths) {
+    const b = tagSetOf(base[p]), l = tagSetOf(local[p]), r = tagSetOf(remote[p]);
+    const keep = new Set();
+    for (const tag of new Set([...b, ...l, ...r])) {
+      const inB = b.has(tag), inL = l.has(tag), inR = r.has(tag);
+      const localChanged = inL !== inB;
+      const remoteChanged = inR !== inB;
+      if (localChanged && remoteChanged) { if (inL || inR) keep.add(tag); }
+      else if (localChanged) { if (inL) keep.add(tag); }
+      else if (remoteChanged) { if (inR) keep.add(tag); }
+      else if (inL) keep.add(tag);
+    }
+    if (keep.size) out[p] = [...keep].sort();
+  }
+  return out;
+}
+
 /**
  * 三方合併共用設定。
  *   base   ＝上次看到的磁碟內容
@@ -105,7 +142,17 @@ function mergeShared(base, local, remote) {
     if (!inR) { merged[k] = local[k]; continue; }
     if (!inL) { merged[k] = remote[k]; continue; }
     const b = base[k];
-    if (isPlainObject(local[k]) && isPlainObject(remote[k]) && (b === undefined || isPlainObject(b))) {
+    if (k === 'assetTags') {
+      /* 檔案標籤用集合合併，避免兩台各加一個標籤時互相覆蓋。
+         另外：磁碟上是空物件、本機或 base 卻有標籤時，當成「另一台還沒同步到
+         這個欄位」而不是「對方把所有標籤刪光了」—— 整包清空的代價太高，
+         寧可保守保留。真要清空請逐檔移除。 */
+      const remoteEmpty = !isPlainObject(remote[k]) || !Object.keys(remote[k]).length;
+      const keepLocal = remoteEmpty && (
+        (isPlainObject(local[k]) && Object.keys(local[k]).length) ||
+        (isPlainObject(b) && Object.keys(b).length));
+      merged[k] = keepLocal ? clone(local[k]) : mergeTagMap(b || {}, local[k], remote[k]);
+    } else if (isPlainObject(local[k]) && isPlainObject(remote[k]) && (b === undefined || isPlainObject(b))) {
       merged[k] = mergeObject(b || {}, local[k], remote[k]);
     } else {
       merged[k] = deepEqual(local[k], b) ? remote[k] : local[k];

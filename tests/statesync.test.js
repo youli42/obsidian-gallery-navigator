@@ -107,6 +107,46 @@ const ok = (name) => { console.log('  ✓ ' + name); n++; };
   ok('物件 key 順序不同不會被當成變更');
 }
 
+// 情境 10：兩台各給同一張圖加不同標籤 → 集合合併，不能互相覆蓋
+{
+  const base = { assetTags: { 'a.jpg': ['travel'] } };
+  const local = { assetTags: { 'a.jpg': ['travel', 'family'] } };
+  const disk = { assetTags: { 'a.jpg': ['travel', 'jp'] } };
+  const m = mergeShared(base, local, disk);
+  assert.deepStrictEqual(m.merged.assetTags['a.jpg'], ['family', 'jp', 'travel']);
+  ok('assetTags：同一路徑的標籤做集合合併');
+}
+
+// 情境 11：一邊移除、另一邊沒動 → 移除生效；兩邊各加不同路徑 → 都保留
+{
+  const base = { assetTags: { 'a.jpg': ['travel', 'jp'], 'b.jpg': ['work'] } };
+  const local = { assetTags: { 'a.jpg': ['travel'], 'b.jpg': ['work'] } };
+  const disk = { assetTags: { 'a.jpg': ['travel', 'jp'], 'b.jpg': ['work'], 'c.jpg': ['art'] } };
+  const m = mergeShared(base, local, disk);
+  assert.deepStrictEqual(m.merged.assetTags['a.jpg'], ['travel']);
+  assert.deepStrictEqual(m.merged.assetTags['b.jpg'], ['work']);
+  assert.deepStrictEqual(m.merged.assetTags['c.jpg'], ['art']);
+  ok('assetTags：單邊移除生效，不同路徑互不影響');
+}
+
+// 情境 12：標籤正規化（# 前綴、空白、重複）不該被當成不同標籤
+{
+  const base = { assetTags: { 'a.jpg': ['#travel', 'travel', ' jp '] } };
+  const m = mergeShared(base, base, base);
+  assert.deepStrictEqual(m.merged.assetTags['a.jpg'], ['jp', 'travel']);
+  ok('assetTags：正規化與去重');
+}
+
+// 情境 13：磁碟上的 assetTags 是空物件（另一台還沒同步到這個欄位）→ 不可清空本機標籤
+{
+  const base = { assetTags: { 'a.jpg': ['travel'] } };
+  const local = { assetTags: { 'a.jpg': ['travel', 'family'] } };
+  const disk = { assetTags: {} };
+  const m = mergeShared(base, local, disk);
+  assert.deepStrictEqual(m.merged.assetTags, { 'a.jpg': ['travel', 'family'] });
+  ok('assetTags：遠端空物件不會誤清本機標籤');
+}
+
 // （data.json 是個人資料、不進 repo；不存在就略過這一項）
 // 用真的 data.json 跑一輪：沒有任何變更時，合併結果必須和原檔一模一樣
 if (require('fs').existsSync(process.argv[3] || path.join(__dirname, '..', 'data.json'))) {

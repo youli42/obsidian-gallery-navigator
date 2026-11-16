@@ -513,6 +513,32 @@ function tagsOf(cache) {
   return [...set];
 }
 
+/* ===== 非 md 檔案的標籤（圖片 / PDF / Canvas / Base…）=====
+   Obsidian 只替 .md 解析 frontmatter，metadataCache 對其他檔型永遠是空的
+   （getFileCache 回 {}；processFrontMatter 也直接 no-op，見 addTagToFile）。
+   所以這些檔案的標籤存在外掛自己的 state.assetTags：{ 路徑: ['tag', ...] }。
+   讀取一律走 tagsOfFile()，不要各自去翻 cache —— 兩種來源混用會出現
+   「標籤樹看得到、篩選卻撈不到」這種半套行為。 */
+function normalizeTag(tag) {
+  return String(tag == null ? '' : tag).replace(/^#/, '').trim();
+}
+
+function assetTagsOf(state, f) {
+  const map = state && state.assetTags;
+  const list = (map && f && map[f.path]) || [];
+  return list
+    .map((t) => normalizeTag(t))
+    .filter(Boolean)
+    .map((t) => '#' + t);
+}
+
+// 統一入口：md 走 metadataCache，其餘走 assetTags
+function tagsOfFile(app, state, f) {
+  if (!(f instanceof TFile)) return [];
+  if (f.extension === 'md') return tagsOf(app.metadataCache.getFileCache(f));
+  return assetTagsOf(state, f);
+}
+
 // 從筆記取「代表連結」：優先 frontmatter.source，否則內文第一個 http(s) 網址
 function firstExternalUrl(frontmatter, content) {
   const fromFm = frontmatter && frontmatter.source;
@@ -1138,6 +1164,93 @@ class InputModal extends Modal {
   }
 }
 
+/* ===== 標籤選擇器 =====
+   圖片、PDF 等非 md 檔案沒有 Obsidian 原生的標籤屬性，只能由外掛自己的
+   assetTags 管理。這個對話框同時負責「挑既有標籤」與「輸入新標籤」：
+   勾選＝等一下要保留／加入，取消勾選＝移除；輸入後按 Enter 可建立新標籤。 */
+class TagPickerModal extends Modal {
+  constructor(app, selected, allTags, onSubmit) {
+    super(app);
+    this.selected = new Set(selected || []);
+    this.allTags = [...new Set(allTags || [])].filter(Boolean);
+    this.onSubmit = onSubmit;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    this.setTitle(t('Tags'));
+    const input = contentEl.createEl('input', {
+      type: 'text',
+      cls: 'gn-input',
+      attr: { placeholder: t('Filter or create a tag…') },
+    });
+    const list = contentEl.createDiv('gn-tagpick-list');
+
+    const render = () => {
+      list.empty();
+      const typed = normalizeTag(input.value);
+      const q = typed.toLowerCase();
+      const tags = [...new Set([...this.allTags, ...this.selected])]
+        .filter((x) => x && (!q || x.toLowerCase().includes(q)))
+        .sort((a, b) => a.localeCompare(b));
+      /* 輸入了一個還不存在的標籤 → 最上面給一列「建立」，
+         不必先按 Enter 也能直接用滑鼠點。比對用 lower-case，但建立時保留原大小寫。 */
+      const exists = [...this.allTags, ...this.selected]
+        .some((x) => String(x).toLowerCase() === q);
+      if (typed && !exists) {
+        const create = list.createDiv('gn-tagpick-row gn-tagpick-create');
+        create.createSpan({ text: t('Create #{{tag}}', { tag: typed }) });
+        create.onclick = () => { this.selected.add(typed); input.value = ''; render(); input.focus(); };
+      }
+      if (!tags.length && !q) {
+        list.createDiv('gn-empty').setText(t('No tags yet — type one above'));
+      }
+      for (const tag of tags) {
+        const row = list.createDiv('gn-tagpick-row' + (this.selected.has(tag) ? ' is-on' : ''));
+        const cb = row.createEl('input', { type: 'checkbox' });
+        cb.checked = this.selected.has(tag);
+        row.createSpan('gn-tagpick-name').setText('#' + tag);
+        cb.onchange = () => {
+          this.selected[cb.checked ? 'add' : 'delete'](tag);
+          row.toggleClass('is-on', cb.checked);
+        };
+        row.onclick = (e) => {
+          if (e.target === cb) return;   // 勾選框自己會處理，避免點一下切兩次
+          cb.checked = !cb.checked;
+          this.selected[cb.checked ? 'add' : 'delete'](tag);
+          row.toggleClass('is-on', cb.checked);
+        };
+      }
+    };
+    input.addEventListener('input', render);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !isImeKey(e)) {
+        const tag = normalizeTag(input.value);
+        if (!tag) return;
+        e.preventDefault();
+        this.selected.add(tag);
+        if (!this.allTags.includes(tag)) this.allTags.push(tag);
+        input.value = '';
+        render();
+      }
+    });
+    render();
+
+    const btns = contentEl.createDiv('modal-button-container');
+    const cancel = btns.createEl('button', { text: t('Cancel') });
+    cancel.onclick = () => this.close();
+    const done = btns.createEl('button', { text: t('Done') });
+    done.addClass('mod-cta');
+    done.onclick = () => {
+      const typed = normalizeTag(input.value);
+      if (typed) this.selected.add(typed);   // 輸入了但沒按 Enter → 也算
+      this.close();
+      this.onSubmit(new Set(this.selected));
+    };
+    setTimeout(() => input.focus(), 0);
+  }
+  onClose() { this.contentEl.empty(); }
+}
+
 /* ===== 資料夾自訂圖示 ===== */
 
 /* 可選圖示清單。用官方的 getIconIds()、**不自己維護一份名單** ——
@@ -1707,9 +1820,9 @@ class GalleryView extends ItemView {
       : notesIn(this.app, folder);
     const count = new Map();
     for (const it of items) {
-      if (it.ext !== 'md') continue;
-      for (const t of tagsOf(this.app.metadataCache.getFileCache(it.file))) {
+      for (const t of tagsOfFile(this.app, this.plugin.state, it.file)) {
         const clean = String(t).replace(/^#/, '');
+        if (!clean) continue;
         count.set(clean, (count.get(clean) || 0) + 1);
       }
     }
@@ -1723,7 +1836,7 @@ class GalleryView extends ItemView {
   // 這則筆記有沒有命中目前的標籤篩選（多選＝OR：任一個中就算）
   matchTagFilter(file) {
     if (!this._tagFilter || !this._tagFilter.size) return true;
-    const tags = tagsOf(this.app.metadataCache.getFileCache(file))
+    const tags = tagsOfFile(this.app, this.plugin.state, file)
       .map((t) => String(t).replace(/^#/, ''));
     for (const want of this._tagFilter) {
       // 命中本身或其子標籤（選 #design 也會撈到 #design/font）
@@ -3092,7 +3205,7 @@ class GalleryView extends ItemView {
         menu.addSeparator();
         menu.addItem((i) => i.setTitle(t('Delete tag')).setIcon('trash').setWarning(true).onClick(() => {
           new ConfirmModal(this.app,
-            t('Remove #{{tag}} (and its sub-tags) from all notes?', { tag: it.tag }),
+            t('Remove #{{tag}} (and its sub-tags) from all files?', { tag: it.tag }),
             async () => {
               await this.deleteTag(it.tag);
               if (this._tagFilter) this._tagFilter.delete(it.tag);
@@ -4477,12 +4590,15 @@ class GalleryView extends ItemView {
     if (this._tagIndexCache && !this._tagDirty) return this._tagIndexCache;
     const map = new Map();     // 'a/b' -> Set<TFile>
     const untagged = [];
-    for (const f of this.app.vault.getMarkdownFiles()) {
-      const tags = tagsOf(this.app.metadataCache.getFileCache(f));
+    /* 2026-11-16：非 md（圖片 / PDF / Canvas…）也納入。它們沒有 frontmatter，
+       標籤來自 state.assetTags，由 tagsOfFile() 統一取得。 */
+    for (const f of this.app.vault.getFiles()) {
+      const tags = tagsOfFile(this.app, this.plugin.state, f);
       if (!tags.length) { untagged.push(f); continue; }
       const added = new Set();
       for (const t of tags) {
         const clean = String(t).replace(/^#/, '');
+        if (!clean) continue;
         let acc = '';
         for (const seg of clean.split('/')) {
           acc = acc ? acc + '/' + seg : seg;
@@ -4506,27 +4622,146 @@ class GalleryView extends ItemView {
     this.refreshTree();
   }
 
-  // 拖卡片到標籤列：把標籤寫進筆記 frontmatter（2026-07-19）。
-  // processFrontMatter 是官方 API——沒有 frontmatter 會自動建立、tags 字串/陣列格式都處理。
+  /* ===== 標籤索引失效 =====
+     assetTags 的變動不會觸發 metadataCache 'changed'（那不是 md 檔），
+     所以寫入後要自己把索引與 dock 快取標髒。 */
+  invalidateTagIndex() {
+    this._tagDirty = true;
+    this._tagGen++;
+    this._folderTagsCache = null;
+  }
+
+  // 非 md：直接改 state.assetTags；回傳「這次有沒有真的加上」
+  assetTagsAdd(file, tag) {
+    const st = this.plugin.state;
+    const map = st.assetTags || (st.assetTags = {});
+    const cur = new Set((map[file.path] || []).map(normalizeTag).filter(Boolean));
+    // 標籤比對不分大小寫（顯示保留原本輸入），避免同時出現 #Travel 與 #travel
+    if ([...cur].some((x) => x.toLowerCase() === tag.toLowerCase())) return false;
+    cur.add(tag);
+    map[file.path] = [...cur];
+    return true;
+  }
+
+  assetTagsRemove(file, tag) {
+    const st = this.plugin.state;
+    const map = st.assetTags || (st.assetTags = {});
+    const cur = (map[file.path] || []).map(normalizeTag).filter(Boolean);
+    const want = tag.toLowerCase();
+    if (!cur.some((x) => x.toLowerCase() === want)) return false;
+    const next = cur.filter((x) => x.toLowerCase() !== want);
+    if (next.length) map[file.path] = next;
+    else delete map[file.path];
+    return true;
+  }
+
+  /* 統一的「加標籤」底層（不跳 Notice，批次流程要自己彙總）。
+     md → frontmatter；其他檔型 → state.assetTags。
+     ⚠️ 官方 processFrontMatter 對非 md 是 no-op（不是丟錯），
+        以前拖圖片到標籤列會誤報「已有該標籤」就是這樣來的。 */
+  async addTagToFile(file, tag) {
+    tag = normalizeTag(tag);
+    if (!tag) return false;
+    if (file.extension !== 'md') {
+      const added = this.assetTagsAdd(file, tag);
+      if (added) this.plugin.saveState();
+      return added;
+    }
+    let added = false;
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      let tags = fm.tags;
+      if (!tags) tags = [];
+      else if (typeof tags === 'string') tags = tags.split(/[,\s]+/).filter(Boolean);
+      else tags = [...tags];
+      const clean = tags.map((x) => String(x).replace(/^#/, ''));
+      if (!clean.includes(tag)) { clean.push(tag); added = true; }
+      fm.tags = clean;
+    });
+    return added;
+  }
+
   async addTagToNote(file, tag) {
     try {
-      let added = false;
-      await this.app.fileManager.processFrontMatter(file, (fm) => {
-        let tags = fm.tags;
-        if (!tags) tags = [];
-        else if (typeof tags === 'string') tags = tags.split(/[,\s]+/).filter(Boolean);
-        else tags = [...tags];
-        const clean = tags.map((x) => String(x).replace(/^#/, ''));
-        if (!clean.includes(tag)) { clean.push(tag); added = true; }
-        fm.tags = clean;
-      });
+      const added = await this.addTagToFile(file, tag);
       new Notice(added
         ? t('Added #{{tag}} to "{{name}}"', { tag, name: file.basename })
         : t('"{{name}}" already has #{{tag}}', { tag, name: file.basename }));
-      // metadata 變動會自動觸發 tag 索引失效與重畫（markTagDirty + refreshViews）
+      if (added) this.refreshAfterTagChange([file]);
     } catch (e) {
       new Notice(t('Failed to add tag: {{msg}}', { msg: e && e.message ? e.message : e }));
     }
+  }
+
+  /* 開啟標籤選擇器。單張卡＝該檔案的完整標籤；多選＝只顯示「所有選取檔案都有的」
+     標籤，避免把只存在於部分檔案的標籤誤刪掉。 */
+  openTagPicker(files) {
+    const targets = (files || []).filter((f) => f instanceof TFile);
+    if (!targets.length) return;
+    const idx = this.buildTagIndex();
+    const all = [...idx.map.keys()].sort((a, b) => a.localeCompare(b));
+    const each = targets.map((f) => new Set(
+      tagsOfFile(this.app, this.plugin.state, f).map(normalizeTag).filter(Boolean)));
+    const common = new Set([...each[0]].filter((tag) => each.every((s) => s.has(tag))));
+    new TagPickerModal(this.app, common, all, (selected) =>
+      this.applyTagSelection(targets, common, selected)).open();
+  }
+
+  /* 標籤寫入後重畫。md 的 metadataCache 是非同步更新的，立刻重建索引
+     有可能讀到舊的 frontmatter → 標籤樹看起來沒更新；延後一點再刷新。
+     非 md 的 assetTags 是同步的，立刻刷新即可。 */
+  refreshAfterTagChange(files) {
+    const hasMd = (files || []).some((f) => f && f.extension === 'md');
+    if (hasMd) setTimeout(() => this.plugin.tagsChanged(), 250);
+    else this.plugin.tagsChanged();
+  }
+
+  // 把選擇器的結果套到每個目標：只處理「相對初始狀態的變化」，
+  // 這樣多選時不會去動那些只存在於部分檔案的標籤。
+  async applyTagSelection(targets, initial, selected) {
+    let added = 0, removed = 0;
+    for (const f of targets) {
+      for (const tag of selected) {
+        if (initial.has(tag)) continue;
+        try { if (await this.addTagToFile(f, tag)) added++; } catch (e) {}
+      }
+      for (const tag of initial) {
+        if (selected.has(tag)) continue;
+        try { if (await this.removeTagFromFile(f, tag)) removed++; } catch (e) {}
+      }
+    }
+    if (added || removed) {
+      this.plugin.saveState();
+      this.refreshAfterTagChange(targets);
+      new Notice(t('Updated tags on {{n}} file(s)', { n: targets.length }));
+    }
+  }
+
+  // 非 md 的標籤改名：含子孫前綴（old/xxx → new/xxx）；回傳有沒有動到
+  assetTagsRename(file, oldPath, newPath) {
+    const st = this.plugin.state;
+    const map = st.assetTags || (st.assetTags = {});
+    const cur = (map[file.path] || []).map(normalizeTag).filter(Boolean);
+    if (!cur.length) return false;
+    let touched = false;
+    const next = cur.map((c) => {
+      if (c === oldPath) { touched = true; return newPath; }
+      if (c.startsWith(oldPath + '/')) { touched = true; return newPath + c.slice(oldPath.length); }
+      return c;
+    });
+    if (touched) map[file.path] = [...new Set(next)];
+    return touched;
+  }
+
+  // 非 md 的標籤刪除：含子孫前綴；回傳有沒有動到
+  assetTagsDelete(file, tagPath) {
+    const st = this.plugin.state;
+    const map = st.assetTags || (st.assetTags = {});
+    const cur = (map[file.path] || []).map(normalizeTag).filter(Boolean);
+    const next = cur.filter((c) => c !== tagPath && !c.startsWith(tagPath + '/'));
+    if (next.length === cur.length) return false;
+    if (next.length) map[file.path] = next;
+    else delete map[file.path];
+    return true;
   }
 
   // 標籤改名/合併核心（2026-07-19）：把 oldPath（含子孫如 old/xxx）改成 newPath。
@@ -4538,6 +4773,10 @@ class GalleryView extends ItemView {
     for (const p of files) {
       const f = asFile(this.app, p);
       if (!(f instanceof TFile)) continue;
+      if (f.extension !== 'md') {
+        if (this.assetTagsRename(f, oldPath, newPath)) changed++;
+        continue;
+      }
       try {
         let touched = false;
         await this.app.fileManager.processFrontMatter(f, (fm) => {
@@ -4556,12 +4795,13 @@ class GalleryView extends ItemView {
         if (touched) changed++;
       } catch (e) {}
     }
-    // 內文的 #標籤（frontmatter 以外）
+    // 內文的 #標籤（frontmatter 以外）；非 md 沒有內文標籤，函式內會跳過
     const body = await this.renameTagInBody(oldPath, newPath, files);
     changed += body.changed;
+    if (changed) { this.plugin.saveState(); this.invalidateTagIndex(); }
 
     if (!silent) {
-      new Notice(t('Renamed #{{old}} → #{{new}} in {{n}} note(s)', { old: oldPath, new: newPath, n: changed }));
+      new Notice(t('Renamed #{{old}} → #{{new}} in {{n}} file(s)', { old: oldPath, new: newPath, n: changed }));
       // 快取過期而跳過的檔案要講出來，不然使用者會以為全部改完了
       if (body.skipped) new Notice(t('Skipped {{n}} note(s) — reopen them and try again', { n: body.skipped }), 6000);
     }
@@ -4581,7 +4821,7 @@ class GalleryView extends ItemView {
     let changed = 0, skipped = 0;
     for (const p of files) {
       const f = asFile(this.app, p);
-      if (!(f instanceof TFile)) continue;
+      if (!(f instanceof TFile) || f.extension !== 'md') continue;
       const cache = this.app.metadataCache.getFileCache(f) || {};
       const hits = (cache.tags || []).filter((x) => {
         const c = String(x.tag || '').replace(/^#/, '');
@@ -4626,6 +4866,10 @@ class GalleryView extends ItemView {
     for (const p of files) {
       const f = asFile(this.app, p);
       if (!(f instanceof TFile)) continue;
+      if (f.extension !== 'md') {
+        if (this.assetTagsDelete(f, tagPath)) changed++;
+        continue;
+      }
       try {
         let touched = false;
         await this.app.fileManager.processFrontMatter(f, (fm) => {
@@ -4640,28 +4884,44 @@ class GalleryView extends ItemView {
         if (touched) changed++;
       } catch (e) {}
     }
-    new Notice(t('Deleted #{{tag}} from {{n}} note(s)', { tag: tagPath, n: changed }));
+    if (changed) { this.plugin.saveState(); this.invalidateTagIndex(); }
+    new Notice(t('Deleted #{{tag}} from {{n}} file(s)', { tag: tagPath, n: changed }));
     if (this.plugin.state.activeTag === tagPath) { this.plugin.state.activeTag = ''; this.plugin.saveState(); }
     this.render();
   }
 
-  // 卡片右鍵「移除 #tag」：從 frontmatter tags 拿掉（2026-07-19）。
-  // 限制：標籤若寫在內文（#inline）不動筆記內文，改用 Notice 明講，不做危險的內文改寫。
+  // 統一的「移除標籤」底層（不跳 Notice）；md 只動 frontmatter，內文行內標籤不動。
+  async removeTagFromFile(file, tag) {
+    tag = normalizeTag(tag);
+    if (!tag) return false;
+    if (file.extension !== 'md') {
+      const removed = this.assetTagsRemove(file, tag);
+      if (removed) this.plugin.saveState();
+      return removed;
+    }
+    let removed = false;
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      let tags = fm.tags;
+      if (!tags) return;
+      if (typeof tags === 'string') tags = tags.split(/[,\s]+/).filter(Boolean);
+      else tags = [...tags];
+      const clean = tags.map((x) => String(x).replace(/^#/, ''));
+      const next = clean.filter((x) => x !== tag);
+      if (next.length !== clean.length) { removed = true; fm.tags = next; }
+    });
+    return removed;
+  }
+
+  // 卡片右鍵「移除 #tag」；限制同前：內文行內標籤不動。
   async removeTagFromNote(file, tag) {
     try {
-      let removed = false;
-      await this.app.fileManager.processFrontMatter(file, (fm) => {
-        let tags = fm.tags;
-        if (!tags) return;
-        if (typeof tags === 'string') tags = tags.split(/[,\s]+/).filter(Boolean);
-        else tags = [...tags];
-        const clean = tags.map((x) => String(x).replace(/^#/, ''));
-        const next = clean.filter((x) => x !== tag);
-        if (next.length !== clean.length) { removed = true; fm.tags = next; }
-      });
+      const removed = await this.removeTagFromFile(file, tag);
       new Notice(removed
         ? t('Removed #{{tag}} from "{{name}}"', { tag, name: file.basename })
-        : t('#{{tag}} is not in frontmatter (it may be an inline tag in the note body)', { tag }));
+        : (file.extension === 'md'
+          ? t('#{{tag}} is not in frontmatter (it may be an inline tag in the note body)', { tag })
+          : t('"{{name}}" does not have #{{tag}}', { tag, name: file.basename })));
+      if (removed) this.refreshAfterTagChange([file]);
     } catch (e) {
       new Notice(t('Failed to remove tag: {{msg}}', { msg: e && e.message ? e.message : e }));
     }
@@ -4751,7 +5011,7 @@ class GalleryView extends ItemView {
         }
         menu.addItem((i) => i.setTitle(t('Delete tag')).setIcon('trash').setWarning(true).onClick(() => {
           new ConfirmModal(this.app,
-            t('Remove #{{tag}} (and its sub-tags) from all notes?', { tag: node.path }),
+            t('Remove #{{tag}} (and its sub-tags) from all files?', { tag: node.path }),
             () => this.deleteTag(node.path)).open();
         }));
         menu.addItem((i) => i.setTitle(t('Rename tag')).setIcon('pencil').onClick(() => {
@@ -4856,6 +5116,12 @@ class GalleryView extends ItemView {
     mk(t('Select all'), 'check-check', () => this.selectAll());
     mk(t('Copy wiki links (one per line)'), 'link', () => this.copySelectedLinks());
     mk(t('Move to…'), 'folder-input', () => this.moveSelected());
+    mk(t('Tags…'), 'tags', () => {
+      const files = [...this.selected]
+        .map((p) => this.app.vault.getAbstractFileByPath(p))
+        .filter((f) => f instanceof TFile);
+      this.openTagPicker(files);
+    });
     mk(t('Delete'), 'trash', () => this.deleteSelected(), true);
     mk(t('Clear selection'), 'x', () => this.clearSel());
   }
@@ -5321,6 +5587,18 @@ class GalleryView extends ItemView {
     if (this._searchQ) gnHighlightInto(titleEl, it.name, gnHighlightTerms(this._searchQ));
     else titleEl.setText(it.name);
 
+    /* 卡片上的標籤徽章（2026-11-16）：圖片 / PDF 沒有原生標籤，沒有這個
+       使用者在資料夾牆上完全看不出分類。絕對定位、不佔高度，所以不會
+       影響瀑布流量測；點一下直接開標籤選擇器。 */
+    const fileTags = tagsOfFile(this.app, this.plugin.state, it.file)
+      .map(normalizeTag).filter(Boolean);
+    if (fileTags.length && (it.src || !isMd)) {
+      const badge = card.createDiv('gn-card-tagbadge');
+      badge.setText('#' + fileTags.length);
+      badge.setAttr('title', fileTags.map((x) => '#' + x).join('  '));
+      badge.onclick = (e) => { e.stopPropagation(); this.openTagPicker([it.file]); };
+    }
+
     if (it.src) {
       // 有封面 → 圖片在上、標題/日期在下
       card.addClass('gn-has-img');
@@ -5465,6 +5743,8 @@ class GalleryView extends ItemView {
       menu.addItem((i) => i.setTitle(t('Open in new tab')).setIcon('plus').onClick(() => this.openNote(it.file, true)));
       menu.addItem((i) => i.setTitle(t('Move to…')).setIcon('folder-input').onClick(() =>
         new FolderSuggest(this.app, (target) => this.moveItem(it.file, target)).open()));
+      // 標籤（2026-11-16）：圖片 / PDF 等非 md 也走同一個入口
+      menu.addItem((i) => i.setTitle(t('Tags…')).setIcon('tags').onClick(() => this.openTagPicker([it.file])));
       // 標籤模式：移除「目前檢視中的標籤」（2026-07-19）
       const curTag = this.plugin.state.leftMode === 'tag' ? this.plugin.state.activeTag : null;
       if (curTag && curTag !== '__untagged__') {
@@ -5782,7 +6062,7 @@ class GalleryView extends ItemView {
       ? filesOverride.map((f) => itemFromFile(app, f))
       : (flatten ? notesInDeep(app, folder, new Set(this.plugin.state.hiddenFolders || [])) : notesIn(app, folder));
     // 本夾標籤篩選（「更多」面板的膠囊；多選＝OR，含子標籤）
-    if (tagFilterOn) items = items.filter((it) => it.ext === 'md' && this.matchTagFilter(it.file));
+    if (tagFilterOn) items = items.filter((it) => this.matchTagFilter(it.file));
     const sorted = keepOrder ? items : sortItems(items, this.plugin.state.sort || 'new');
     // 釘選的卡片浮到最前（feature 4），其餘維持原排序
     const pinnedSet = new Set(this.plugin.state.pinnedCards || []);
@@ -6607,7 +6887,7 @@ class GalleryPlugin extends Plugin {
        本機那份優先；升級後第一次執行還沒有 → 沿用 data.json 裡的（以前都存在那裡）。 */
     const disk = (await this.loadData()) || {};
     const localSaved = this.loadLocalState();
-    this.state = Object.assign({ lastPath: '', cardWidth: 120, sort: 'new', folderOrder: {}, hiddenFolders: [], folderColors: {}, expandedFolders: [], treeWidth: 232, treeCollapsed: false, syncActive: true, leftMode: 'folder', activeTag: '', expandedTags: [], cardColors: {}, noPreviewFolders: [], folderLayouts: {}, favorites: [], pinnedCards: [], lang: '', openUnfocused: true, imageCardLayout: 'stacked', autoCardColor: false, excalidrawThumbs: true }, disk, localSaved ? splitState(localSaved).local : null);
+    this.state = Object.assign({ lastPath: '', cardWidth: 120, sort: 'new', folderOrder: {}, hiddenFolders: [], folderColors: {}, expandedFolders: [], treeWidth: 232, treeCollapsed: false, syncActive: true, leftMode: 'folder', activeTag: '', expandedTags: [], cardColors: {}, noPreviewFolders: [], folderLayouts: {}, favorites: [], pinnedCards: [], assetTags: {}, lang: '', openUnfocused: true, imageCardLayout: 'stacked', autoCardColor: false, excalidrawThumbs: true }, disk, localSaved ? splitState(localSaved).local : null);
     // 三方合併的基準：上次看到的磁碟內容（只含共用設定）
     this._syncBase = splitState(disk).shared;
 
@@ -6742,7 +7022,11 @@ class GalleryPlugin extends Plugin {
     });
     /* 刪除／改名時同步回收 og 圖與兩份索引。
        以前兩份索引都以路徑為 key、卻沒人在檔案消失時清掉 → 圖檔與索引項永久成為孤兒。 */
-    this.registerEvent(this.app.vault.on('delete', (f) => { this.forgetCachedFor(f && f.path); onVaultChange(); }));
+    this.registerEvent(this.app.vault.on('delete', (f) => {
+      this.pruneAssetTags(f);   // 檔案真的不在了 → 清掉它的標籤，否則同路徑新檔會繼承舊標籤
+      this.forgetCachedFor(f && f.path);
+      onVaultChange();
+    }));
     this.registerEvent(this.app.vault.on('rename', (f, oldPath) => { this.renameCachedFor(f && f.path, oldPath); onVaultChange(); }));
     /* 任何來源的改名／搬移都要保住設定（2026-08-18）。
        外掛自己的改名路徑（_commitFolderRename / moveItem）本來就會呼叫，但那只涵蓋
@@ -7084,6 +7368,17 @@ class GalleryPlugin extends Plugin {
     }
   }
 
+  /* 非 md 標籤（state.assetTags）變動後：所有開著的畫廊先標記索引失效再重畫。
+     這些檔案不會觸發 metadataCache 的 'changed'，不自己補這一步就會
+     「標籤寫進去了、樹上卻還是舊的」。 */
+  tagsChanged() {
+    this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => {
+      const view = leaf.view;
+      if (view instanceof GalleryView) view.invalidateTagIndex();
+    });
+    this.refreshViews();
+  }
+
   refreshViews() {
     // 去抖：檔案增刪改名常一次一批，合併成一次重畫
     clearTimeout(this._refreshT);
@@ -7118,6 +7413,26 @@ class GalleryPlugin extends Plugin {
   }
 
   // 去抖寫檔：連續操作（釘選/上色/展開…）只寫一次 data.json，減少 iCloud 寫入
+  /* 檔案／資料夾真的消失時，清掉 assetTags 裡對應的 key。
+     為什麼不等「重建索引時自然忽略」就好：路徑會被重用（同名貼圖重新匯出），
+     留著的舊標籤會默默掛到新檔案上。資料夾要遞迴清整個前綴。 */
+  pruneAssetTags(target) {
+    const map = this.state && this.state.assetTags;
+    if (!target || !map) return false;
+    let touched = false;
+    if (target instanceof TFolder) {
+      const pre = target.path ? target.path + '/' : '';
+      for (const p of Object.keys(map)) {
+        if (p === target.path || p.startsWith(pre)) { delete map[p]; touched = true; }
+      }
+    } else if (target.path && Object.prototype.hasOwnProperty.call(map, target.path)) {
+      delete map[target.path];
+      touched = true;
+    }
+    if (touched) this.saveState();
+    return touched;
+  }
+
   /* 路徑改變（改名／搬移）後，把所有「拿路徑當 key」的設定一起搬到新路徑。
      （2026-08-18）在此之前只有 _commitFolderRename 手動 remap expandedFolders，
      moveItem 連那個都沒做 —— 改名或拖拉搬移一次，該資料夾的顏色、自訂圖示、隱藏狀態、
@@ -7143,7 +7458,9 @@ class GalleryPlugin extends Plugin {
     /* 先探一次有沒有命中再動手。這支現在掛在 vault 的 rename 事件上，
        任何一個檔案改名都會進來 —— 絕大多數跟本外掛的設定無關，
        不先擋掉就變成每次改名都白重建七八個物件、還多寫一次 data.json。 */
-    const dicts = ['folderColors', 'folderIcons', 'folderLayouts', 'cardColors'];
+    /* assetTags 也是「路徑 → 值」的字典，但值本身是標籤陣列；
+       下面 ① 的泛用 remap 對它同樣有效，不需要特別分支。 */
+    const dicts = ['folderColors', 'folderIcons', 'folderLayouts', 'cardColors', 'assetTags'];
     const lists = ['expandedFolders', 'hiddenFolders', 'noPreviewFolders', 'pinnedCards'];
     let touched = hit(st.lastPath);
     if (!touched) for (const k of dicts) { const s = st[k]; if (s && typeof s === 'object' && Object.keys(s).some(hit)) { touched = true; break; } }
@@ -7281,6 +7598,7 @@ class GalleryPlugin extends Plugin {
      回傳 true ＝真的有東西變了。 */
   applySharedState(merged, snapshot) {
     let changed = false;
+    let tagsTouched = false;
     for (const k of Object.keys(merged)) {
       if (deepEqual(merged[k], snapshot[k])) continue;
       const cur = this.state[k];
@@ -7292,7 +7610,15 @@ class GalleryPlugin extends Plugin {
       } else {
         this.state[k] = next;
       }
+      if (k === 'assetTags') tagsTouched = true;
       changed = true;
+    }
+    // 別台同步過來的檔案標籤不會經過本地寫入流程 → 這裡補標髒
+    if (tagsTouched) {
+      this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => {
+        const view = leaf.view;
+        if (view instanceof GalleryView) view.invalidateTagIndex();
+      });
     }
     return changed;
   }
