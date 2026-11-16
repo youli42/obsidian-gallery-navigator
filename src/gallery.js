@@ -6310,7 +6310,7 @@ class GallerySettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName(t('Video covers'))
-      .setDesc(t('Video cards show a first-frame cover, or a same-name image next to the file (clip.mp4 + clip.jpg / clip.cover.jpg). Frames are extracted in the background, only for cards on screen, and share the cover cache below. Turn off if folders full of large videos feel slow.'))
+      .setDesc(t('Video cards show a first-frame cover, or a same-name image next to the file (clip.mp4 + clip.jpg / clip.cover.jpg). Frames are extracted in the background, only for cards on screen, and share the cover cache below. Turning this off stops frame extraction; a same-name image next to the video is still used.'))
       .addToggle((tg) => tg.setValue(st.videoCovers !== false)
         .onChange((v) => { st.videoCovers = v; save(); this.plugin.refreshViews(); }));
 
