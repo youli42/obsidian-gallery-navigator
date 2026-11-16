@@ -26,6 +26,7 @@
 const LOCAL_KEYS = [
   'lastPath', 'treeScrollTop', 'treeWidth', 'treeCollapsed', 'cardWidth', 'mobileCols',
   'expandedFolders', 'expandedTags', 'leftMode', 'activeTag', 'tagDockOpen', 'favCollapsed',
+  'videoCoverMaxMB',
 ];
 const LOCAL_SET = new Set(LOCAL_KEYS);
 

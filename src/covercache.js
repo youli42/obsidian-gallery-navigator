@@ -1,15 +1,17 @@
 'use strict';
 
-/* ===== Excalidraw 縮圖落盤快取（2026-11-16）=====
+/* ===== 卡片封面落盤快取（2026-11-16）=====
  *
- * 問題：Excalidraw 縮圖以前只存在記憶體（gallery.js 的 _xcalThumbCache，上限 40 張、
- *   key 含 mtime，值是 dataURL 字串）。代價有三個：
- *     • 重啟 Obsidian、捲回第 41 張、圖被改過 → 全部重跑一次匯出（單張 58ms 中位數，
- *       大圖 250ms，全在主執行緒）
- *     • dataURL 是 base64，記憶體佔用是檔案大小的 1.33 倍，且張數與體積完全脫鉤
- *       （實測單張 45KB–1.24MB）
- *   這裡把縮圖落到磁碟，機制照抄 thumbs.js 的 thumb-cache/（同一套索引 + 去抖寫入），
- *   第二次進同一個資料夾就完全不匯出。
+ * 放的是「由來源檔生成、隨時可以重建的卡片封面圖」：
+ *   • Excalidraw 繪圖縮圖（.excalidraw.md / .excalidraw）
+ *   • 影片首幀（mp4 / mov / webm…，見 videocover.js）
+ *   • 之後要加別的（PDF 首頁快照、網頁截圖…）也丟這裡：同一個目錄、同一份配額。
+ * 影格圖存 .jpg、繪圖縮圖存 .png/.svg，檔名是「來源路徑的 hash + 副檔名」，
+ * 同一個來源路徑只會屬於其中一種，不會互撞。
+ *
+ * 為什麼要落盤：以前這些縮圖只存在記憶體（dataURL 字串），重啟 Obsidian、
+ * 捲回第 41 張、圖被改過 → 全部重跑一次生成（繪圖單張中位數 58ms、大圖 250ms，
+ * 全在主執行緒；影片還要整檔讀進來重新解碼）。落盤之後第二次進同一個資料夾就是讀檔。
  *
  * 三個設計重點：
  *   1. **預算是位元組，不是張數**（見 budgetBytes）。張數上限對「大圖小圖混在一起」
@@ -18,17 +20,23 @@
  *      反而讓命中率變差。
  *   3. **索引壞掉就當作空**。縮圖是純快取，任何異常都只是重做一次，不值得為了
  *      還原它去冒險（thumbs.js 的 prune 註解有同樣的取捨）。
+ *
+ * ⚠️ 配額是所有封面共用一份（設定頁「封面快取」）：影片首幀不會因為「另一種東西」
+ *    而繞過預算。呼叫端在 set() 回 null 時要接受「這張卡沒有封面」，不要另外退回
+ *    內嵌 dataURL——那等於繞過配額，幾十張卡就能吃掉幾 MB 常駐記憶體。
+ *    （唯一的例外是 Excalidraw 的退回：見 gallery.js 的 renderXcalThumb，磁碟寫不進去時
+ *      仍留一份 dataURL 在記憶體，否則整面牆會少一張圖；那條路有 XCAL_THUMB_MAX 上限。）
  */
 
-const DEFAULT_MB_DESKTOP = 200;   // 200 張 ≈ 12MB（480px 寬），留足餘裕
-const DEFAULT_MB_MOBILE = 50;     // 手機磁碟小、也很少一次翻大資料夾
+const DEFAULT_MB_DESKTOP = 200;   // 200 MB：480px 縮圖約 30–100KB、影片首幀約 50–150KB，夠幾千張
+const DEFAULT_MB_MOBILE = 50;     // 50 MB：手機磁碟小、也很少一次翻大資料夾
 const MIN_MB = 10;
 const MAX_MB = 2000;
 const SINGLE_MAX_RATIO = 0.25;    // 單張不得超過預算的 1/4
 
 /* 檔名用的 hash（與 thumbs.js 同一套 cyrb53 風格雙 32-bit，等效 64-bit）。
    ⚠️ 這裡刻意重複一份而不是從 thumbs.js 匯出：兩者檔案路徑不同、生命週期不同，
-      共用一個匯出反而讓「改 thumb 的命名」有機會弄壞 xcal 的既有快取。 */
+      共用一個匯出反而讓「改 thumb 的命名」有機會弄壞這份既有快取。 */
 function hash64(s) {
   let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
   for (let i = 0; i < s.length; i++) {
@@ -41,12 +49,12 @@ function hash64(s) {
   return (h2 >>> 0).toString(36) + (h1 >>> 0).toString(36);
 }
 
-class XcalCache {
+class CoverCache {
   constructor(plugin) {
     this.plugin = plugin;
     this.app = plugin.app;
     /* index: 檔案路徑 → [檔名, mtime, bytes, at]
-       mtime 不符＝來源圖被改過，視為沒有（會重做並覆蓋）。
+       mtime 不符＝來源檔被改過，視為沒有（會重做並覆蓋）。
        at 是最後一次命中的時間戳，只用來做 LRU 淘汰。 */
     this.index = {};
     this.used = 0;
@@ -57,12 +65,12 @@ class XcalCache {
     this._loadP = null;
   }
 
-  dir() { return this.plugin.manifest.dir + '/xcal-cache'; }
+  dir() { return this.plugin.manifest.dir + '/cover-cache'; }
   indexPath() { return this.dir() + '/index.json'; }
 
   /** 這台裝置的快取預算（位元組）。設定值非法就退回預設。 */
   budgetBytes() {
-    const raw = Number(this.plugin.state && this.plugin.state.xcalCacheMB);
+    const raw = Number(this.plugin.state && this.plugin.state.coverCacheMB);
     const mobile = document.body.classList.contains('is-mobile');
     const mb = Number.isFinite(raw) && raw > 0 ? raw : (mobile ? DEFAULT_MB_MOBILE : DEFAULT_MB_DESKTOP);
     return Math.round(Math.min(MAX_MB, Math.max(MIN_MB, mb)) * 1024 * 1024);
@@ -98,7 +106,7 @@ class XcalCache {
     return this._loadP;
   }
 
-  /** 有可用的落盤縮圖 → 回傳資源路徑；mtime 不符或沒有 → null */
+  /** 有可用的落盤封面 → 回傳資源路徑；mtime 不符或沒有 → null */
   urlFor(file) {
     const rec = this.index[file.path];
     if (!rec || rec[1] !== file.stat.mtime) return null;
@@ -111,7 +119,7 @@ class XcalCache {
     try { return a.getResourcePath(this.dir() + '/' + rec[0]); } catch (e) { return null; }
   }
 
-  /** 寫入一張縮圖。成功回傳資源路徑；超過單張上限或寫入失敗 → null（呼叫端退回記憶體） */
+  /** 寫入一張封面。成功回傳資源路徑；超過單張上限或寫入失敗 → null（呼叫端維持原卡樣） */
   async set(file, bytes, ext) {
     await this.ensure();
     const buf = bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : bytes;
@@ -122,7 +130,7 @@ class XcalCache {
       const a = this.app.vault.adapter;
       const dir = this.dir();
       if (!(await a.exists(dir))) await a.mkdir(dir);
-      /* 同一路徑重做時檔名通常不變（hash 只吃路徑），只有 png↔svg 這種會換副檔名。
+      /* 同一路徑重做時檔名通常不變（hash 只吃路徑），只有 png↔jpg／svg 這種會換副檔名。
          先把舊的一筆從帳上扣掉，再按新檔寫入，used 才不會重複累加。 */
       const old = this.index[file.path];
       if (old) {
@@ -172,7 +180,7 @@ class XcalCache {
 
   /* 這個路徑本身與它下面所有子路徑的索引鍵。
      ⚠️ 資料夾被刪除／改名時，傳進來的是資料夾路徑，只處理「完全相等」那一筆
-        會把整個子樹的縮圖留成永久孤兒（要等使用者手動清快取才會消失）。 */
+        會把整個子樹的封面留成永久孤兒（要等使用者手動清快取才會消失）。 */
   _keysUnder(path) {
     const prefix = path + '/';
     return Object.keys(this.index).filter((k) => k === path || k.startsWith(prefix));
@@ -243,7 +251,7 @@ class XcalCache {
     this._evict();
     removed += before - Object.keys(this.index).length;
     /* 孤兒檔（索引裡沒有的檔案）：只在索引確實可信時才動手。
-       多留一份孤兒只是佔空間；刪錯一張要重新匯出，兩害相權取其輕。 */
+       多留一份孤兒只是佔空間；刪錯一張要重新生成，兩害相權取其輕。 */
     try {
       if (await a.exists(this.dir())) {
         const list = await a.list(this.dir());
@@ -259,7 +267,7 @@ class XcalCache {
     return removed;
   }
 
-  /** 設定頁「清除快取」：整個目錄清空（不是只清失效的） */
+  /** 設定頁「清除封面快取」：整個目錄清空（不是只清失效的） */
   async clearAll() {
     await this.ensure();
     const a = this.app.vault.adapter;
@@ -298,7 +306,7 @@ class XcalCache {
   }
 
   /* 未落地的索引立刻寫出（onunload 用）。
-     ⚠️ 少了這一步：縮圖檔已在磁碟、索引還卡在 1.5s 去抖窗裡就被停用 → 下次啟動
+     ⚠️ 少了這一步：封面檔已在磁碟、索引還卡在 1.5s 去抖窗裡就被停用 → 下次啟動
         整批重做，舊檔全成孤兒（thumbs.js 同一個坑）。 */
   async flush() {
     if (this._saveT) { clearTimeout(this._saveT); this._saveT = 0; }
@@ -306,4 +314,4 @@ class XcalCache {
   }
 }
 
-module.exports = { XcalCache, DEFAULT_MB_DESKTOP, DEFAULT_MB_MOBILE, MIN_MB, MAX_MB };
+module.exports = { CoverCache, DEFAULT_MB_DESKTOP, DEFAULT_MB_MOBILE, MIN_MB, MAX_MB };

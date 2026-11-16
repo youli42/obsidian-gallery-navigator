@@ -807,6 +807,7 @@ body:not(.is-mobile) .gn-card:hover {
 :where(body:not(.is-mobile)) .gn-selbar-warn:hover, .gn-selbar-warn:active { background: var(--background-modifier-error, rgba(220,60,60,.15)); color: var(--text-error); }
 .gn-card img { width: 100%; height: auto; display: block; pointer-events: none; }
 .gn-card img.gn-pdf-thumb { background: #fff; box-shadow: inset 0 0 0 1px rgba(0,0,0,.06); }   /* PDF 頁面：白底 + 細邊 */
+.gn-card img.gn-video-thumb { background: #000; }   /* 影片首幀：載入前先給黑底（影片畫面的常見底色） */
 /* Excalidraw 縮圖：只加細邊，**不**強制白底——匯出帶不帶背景跟著外掛設定走
    （exportWithBackground），暗色繪圖被壓上白底反而看不出是同一張圖。
    透明區域露出卡片底色，和筆記內嵌圖的表現一致。 */
