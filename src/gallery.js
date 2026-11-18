@@ -62,6 +62,11 @@ const GN_ICON_SVG =
   '<rect x=".9" y="13.7" width="4.3" height="4.3" rx="1.3" ry="1.3"/>' +
   '</g>';
 
+/* 卡片拖出到系統（2026-11-18）：1×1 透明 PNG。
+   Electron 的 startDrag 在 macOS 要求拖曳圖示非空，用 data URL 就不必多帶一個檔案。 */
+const DRAG_OUT_ICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
+const DRAG_OUT_MODES = ['ctrl', 'alt', 'always', 'off'];
+
 
 /* ===== 併發閘（2026-08-12）=====
  *
@@ -1415,9 +1420,11 @@ class GalleryView extends ItemView {
     this.plugin = plugin;
     this.path = plugin.state.lastPath || '';
     this.showHidden = false;
-    this.drag = null;         // { kind: 'note'|'folder', path }
+    this.drag = null;         // { kind: 'note'|'folder', path, paths? }（paths＝多選批次）
     this.selected = new Set();   // 多選：檔案路徑
     this.selAnchor = null;       // 範圍選的錨點
+    this._treeFilterOn = false;  // 左樹名稱過濾（桌機）
+    this._treeFilter = '';
     /* 資料夾多選（2026-08-18）—— 跟卡片的 selected 分開放，不共用。
        兩者的批次操作對象不同（檔案 vs 資料夾），混在一起「移動」會分不清該搬什麼。
        folderSelMode 是**手機專用**的選取模式：手機沒有 Cmd/Shift，
@@ -1736,8 +1743,16 @@ class GalleryView extends ItemView {
   }
 
   // 切到某個資料夾（根目錄列、最愛捷徑、麵包屑、右鍵「跳到資料夾」都走這裡）
+  // 離開搜尋（呼叫端負責重畫；工具列輸入框會跟著重建）
+  clearSearchState() {
+    this._searchOn = false;
+    this._searchQ = '';
+    this._searchTreeOpen = false;
+  }
+
   navigate(path) {
     this._pendingAnchor = null;   // 使用者自己選了資料夾 → 取消待辦的定位，別等一下亂跳
+    this.clearSearchState();      // 搜尋是暫時狀態：點資料夾就回到資料夾牆（搜尋框是常駐的）
     this.path = path;
     this.plugin.state.lastPath = path;
     this._tagFilter = new Set();   // 換資料夾 → 清掉上一夾的標籤篩選
@@ -1771,6 +1786,81 @@ class GalleryView extends ItemView {
     requestAnimationFrame(blurNow);
     window.setTimeout(blurNow, 60);
     window.setTimeout(blurNow, 160);
+  }
+
+  /* ===== 卡片拖出到系統（2026-11-18）=====
+     Obsidian 的 dragManager 只在 dataTransfer 裡放 obsidian:// 網址，其他程式收到的是連結、
+     不是檔案。要像從檔案總管拖出來，得走 Electron 的 webContents.startDrag。
+
+     ⚠️ startDrag 會接管整次拖曳：Windows 上 Obsidian 自己就不再是 drop target
+        （electron/electron#7118），所以「一般拖曳也拖出」和「拖到左側資料夾搬移」
+        不可能同時成立。做法是修飾鍵分流：按住指定鍵＝拖出到系統，其餘維持內部搬移。 */
+  dragOutMode() {
+    if (document.body.classList.contains('is-mobile')) return 'off';
+    const mode = this.plugin.state.dragOut || 'ctrl';
+    return DRAG_OUT_MODES.includes(mode) ? mode : 'ctrl';
+  }
+  wantsDragOut(e) {
+    const mode = this.dragOutMode();
+    if (mode === 'off') return false;
+    if (mode === 'always') return true;
+    if (mode === 'alt') return !!e.altKey;
+    return !!(e.ctrlKey || e.metaKey);   // 'ctrl'：Windows/Linux Ctrl、macOS Cmd
+  }
+  // vault 相對路徑 → 磁碟絕對路徑（startDrag 只吃絕對路徑）
+  dragOutPath(file) {
+    try {
+      const adapter = this.app.vault.adapter;
+      const base = adapter && typeof adapter.getBasePath === 'function' ? adapter.getBasePath() : '';
+      if (!base) return null;
+      const sep = base.indexOf('\\') >= 0 ? '\\' : '/';
+      return base.replace(/[\\/]+$/, '') + sep + String(file.path).split('/').join(sep);
+    } catch (e) { return null; }
+  }
+  /* 取 Electron webContents。@electron/remote 優先，退回舊版 electron.remote
+     （Obsidian 目前兩者其一都還在；取不到就代表這個環境不支援原生拖曳）。 */
+  electronWebContents() {
+    try {
+      const req = typeof window !== 'undefined' && typeof window.require === 'function'
+        ? window.require.bind(window) : null;
+      if (!req) return null;
+      try {
+        const remote = req('@electron/remote');
+        if (remote && typeof remote.getCurrentWebContents === 'function') return remote.getCurrentWebContents();
+      } catch (e) {}
+      const electron = req('electron');
+      if (electron && electron.remote && typeof electron.remote.getCurrentWebContents === 'function') {
+        return electron.remote.getCurrentWebContents();
+      }
+    } catch (e) {}
+    return null;
+  }
+  /* 回傳 true ＝ 已交給系統拖曳，呼叫端不要再走 Obsidian 內部拖曳。 */
+  startFileDrag(files) {
+    const paths = files.map((f) => this.dragOutPath(f)).filter(Boolean);
+    if (!paths.length) return false;
+    const wc = this.electronWebContents();
+    if (!wc || typeof wc.startDrag !== 'function') return false;
+    let icon;
+    try {
+      const req = window.require.bind(window);
+      icon = req('electron').nativeImage.createFromDataURL(DRAG_OUT_ICON);
+    } catch (e) { icon = undefined; }
+    try {
+      /* files 會覆寫 file，一次把整批選取交給系統（Electron 28+）。
+         舊版只認 file 時至少也會拖出第一張，不會整個沒反應。 */
+      wc.startDrag(paths.length > 1
+        ? { file: paths[0], files: paths, icon }
+        : { file: paths[0], icon });
+      return true;
+    } catch (e) {
+      console.warn('[Gallery Navigator] native file drag failed', e);
+      return false;
+    }
+  }
+  clearCardDragMarks() {
+    if (!this.contentEl) return;
+    for (const el of this.contentEl.findAll('.gn-card-dragging')) el.removeClass('gn-card-dragging');
   }
 
   // （2026-07-20 移除）連結牆整套下架：outgoingMdFiles / incomingMdFiles / showLinks / renderLinksWall 一併移除。
@@ -1942,38 +2032,88 @@ class GalleryView extends ItemView {
       pop.createDiv('gn-more-sep');
     }
 
-    /* ── 圖片卡版面（2026-08-10 從設定頁移入）──
-       有封面的卡片，標題與日期怎麼擺。兩個平台都有：手機也吃得到這個版面差異
-       （editorial 在手機是固定 2 欄），設定頁那份已移除，這裡是唯一入口。 */
-    pop.createDiv('gn-more-label').setText(t('Image card layout'));
-    const curLayout = GN_LAYOUTS.includes(state.imageCardLayout) ? state.imageCardLayout : 'overlay';
-    /* ⚠️ 左邊的 key（overlay / stacked / editorial）是**存進 data.json 的值**，
-       不能改 —— 改了既有使用者的設定會失效。這裡只換顯示名稱：
-       用場景命名取代描述式的長句（2026-08-10 使用者定名）。
-         Photo   ＝ 文字疊在圖上，整面看起來就是一牆照片
-         Museum  ＝ 圖在上、說明在下，像展品旁的標示牌
-         Editor  ＝ 小縮圖＋大日期的索引卡，文字為主 */
+    /* ── 圖片卡版面（2026-11-18 收攏）──
+       桌機：這裡只放**本資料夾的覆寫**，全域預設搬回設定頁。
+       手機：維持原況（全域值在這裡、本夾覆寫在牆頭），避免動到已確認的手機版。
+       兩個入口分不清「本夾 / 全域」正是上一版最難用的地方。 */
+    const isMobileUI = document.body.classList.contains('is-mobile');
     const LAYOUTS = [
       ['overlay', 'image', 'Photo'],        // 一張照片本身
       ['stacked', 'frame', 'Museum'],       // 畫框：作品 + 下方標示牌
       ['editorial', 'type', 'Editor'],      // 字體 T：文字為主
     ];
-    for (const [key, icon, label] of LAYOUTS) {
-      const row = pop.createDiv('gn-more-row');
-      row.toggleClass('gn-more-row-on', key === curLayout);
-      setIcon(row.createSpan('gn-more-icon'), icon);
-      row.createSpan('gn-more-text').setText(t(label));
-      const mark = row.createSpan('gn-more-check');
-      if (key === curLayout) setIcon(mark, 'check');
-      row.onclick = () => {
-        state.imageCardLayout = key;
+    if (isMobileUI) {
+      pop.createDiv('gn-more-label').setText(t('Image card layout'));
+      const curLayout = GN_LAYOUTS.includes(state.imageCardLayout) ? state.imageCardLayout : 'overlay';
+      for (const [key, icon, label] of LAYOUTS) {
+        const row = pop.createDiv('gn-more-row');
+        row.toggleClass('gn-more-row-on', key === curLayout);
+        setIcon(row.createSpan('gn-more-icon'), icon);
+        row.createSpan('gn-more-text').setText(t(label));
+        const mark = row.createSpan('gn-more-check');
+        if (key === curLayout) setIcon(mark, 'check');
+        row.onclick = () => {
+          state.imageCardLayout = key;
+          this.plugin.saveState();
+          this.closeMorePopover();
+          this.render();
+        };
+      }
+      pop.createDiv('gn-more-sep');
+    } else if (!this._searchOn && state.leftMode !== 'tag') {
+      const own = this.ownLayout();
+      pop.createDiv('gn-more-label').setText(t('Image card layout') + ' · ' + t('This folder'));
+      const rows = [{
+        icon: 'rotate-ccw',
+        label: t('Follow global'),
+        checked: !own,
+        onClick: () => {
+          const map = Object.assign({}, state.folderLayouts || {});
+          delete map[this.path || ''];
+          state.folderLayouts = map;
+          this.plugin.saveState();
+          this.closeMorePopover();
+          this.render();
+        },
+      }];
+      for (const [key, icon, label] of LAYOUTS) {
+        rows.push({
+          icon, label: t(label), checked: own === key,
+          onClick: () => {
+            const map = Object.assign({}, state.folderLayouts || {});
+            map[this.path || ''] = key;
+            state.folderLayouts = map;
+            this.plugin.saveState();
+            this.closeMorePopover();
+            this.render();
+          },
+        });
+      }
+      for (const r of rows) {
+        const row = pop.createDiv('gn-more-row');
+        row.toggleClass('gn-more-row-on', !!r.checked);
+        setIcon(row.createSpan('gn-more-icon'), r.icon);
+        row.createSpan('gn-more-text').setText(r.label);
+        const mark = row.createSpan('gn-more-check');
+        if (r.checked) setIcon(mark, 'check');
+        row.onclick = r.onClick;
+      }
+
+      /* 攤平：含子資料夾。以前在牆頭，現在只有這一個入口。 */
+      const flatRow = pop.createDiv('gn-more-row');
+      flatRow.toggleClass('gn-more-row-on', !!state.flattenFolders);
+      setIcon(flatRow.createSpan('gn-more-icon'), 'layers');
+      flatRow.createSpan('gn-more-text').setText(t('Flatten: include all subfolders'));
+      const flatMark = flatRow.createSpan('gn-more-check');
+      if (state.flattenFolders) setIcon(flatMark, 'check');
+      flatRow.onclick = () => {
+        state.flattenFolders = !state.flattenFolders;
         this.plugin.saveState();
         this.closeMorePopover();
-        // 版面會改卡片結構與欄寬下限 → 整頁重畫（卡片大小滑桿的檔位也要跟著重算）
         this.render();
       };
+      pop.createDiv('gn-more-sep');
     }
-    pop.createDiv('gn-more-sep');
 
     /* ── 卡片大小：**吸附式**滑桿（2026-08-10 改）──
        手機不顯示（手機是固定欄數，用上面的「手機的卡片欄數」）。
@@ -2185,15 +2325,228 @@ class GalleryView extends ItemView {
     });
   }
 
-  newFileMenu(folder, evt) {
+  /* ===== 原生風格的資料夾選單（2026-11-18）=====
+     原生資料夾右鍵的「新建」不是寫在 file-menu 裡：
+       · New note / New folder 由核心 File Explorer 直接加；
+       · New canvas / New base / 其他外掛的新增項，才是各外掛監聽
+         workspace 的 'file-menu'（file 是 TFolder、source 是
+         'file-explorer-context-menu'）加進來的。
+     這裡也走同一條：核心兩項自己加，再把暫時選單裡的項目抄過來。
+     這樣 QuickAdd / Templater / Canvas / Bases 等外掛的新增項都會出現。 */
+  _menuSections(menu) {
+    try {
+      if (typeof menu.addSections === 'function') {
+        menu.addSections(['title', 'open', 'action-primary', 'action', 'info', 'info.copy', 'view', 'system', '', 'danger']);
+      }
+    } catch (e) {}
+  }
+  _menuItem(menu, section, build) {
+    menu.addItem((i) => {
+      try { if (typeof i.setSection === 'function') i.setSection(section); } catch (e) {}
+      build(i);
+    });
+  }
+  /* 把 from 選單的項目抄到 to。section=null 時保留原本的分區。
+     ⚠️ 只碰公開可見的選單結構；取不到 items 就安靜跳過，核心新建仍然可用。 */
+  _copyMenuActions(from, to, section) {
+    const items = Array.isArray(from && from.items) ? from.items : [];
+    for (const it of items) {
+      if (!it) continue;
+      if (section != null && it.section !== section) continue;
+      const title = it.titleEl
+        ? (typeof it.titleEl.getText === 'function' ? it.titleEl.getText() : it.titleEl.textContent)
+        : '';
+      if (!title) continue;
+      if (!it.submenu && typeof it.callback !== 'function') continue;
+      to.addItem((i) => {
+        const sec = section == null ? it.section : section;
+        try { if (sec && typeof i.setSection === 'function') i.setSection(sec); } catch (e) {}
+        i.setTitle(title);
+        try {
+          if (it.iconEl && it.iconEl.firstElementChild) i.iconEl.appendChild(it.iconEl.firstElementChild.cloneNode(true));
+        } catch (e) {}
+        try { if (it.disabled) i.setDisabled(true); } catch (e) {}
+        try { if (it.checked) i.setChecked(true); } catch (e) {}
+        try { if (it.dom && it.dom.hasClass && it.dom.hasClass('is-warning')) i.setWarning(true); } catch (e) {}
+        if (it.submenu) {
+          this._copyMenuActions(it.submenu, i.setSubmenu(), null);
+        } else if (typeof it.callback === 'function') {
+          i.onClick((evt) => it.callback(evt));
+        }
+      });
+    }
+  }
+  _collectPluginMenuItems(menu, folder, onlyNew) {
+    const previous = this.plugin._suppressGalleryFolderMenu;
+    this.plugin._suppressGalleryFolderMenu = true;
+    try {
+      const tmp = new Menu();
+      this._menuSections(tmp);
+      this.app.workspace.trigger('file-menu', tmp, folder, 'file-explorer-context-menu', null);
+      this._copyMenuActions(tmp, menu, onlyNew ? 'action-primary' : null);
+    } catch (e) {
+      /* 其他外掛的選單出錯，不影響核心新建 */
+    } finally {
+      this.plugin._suppressGalleryFolderMenu = previous;
+    }
+  }
+  // 只含「新建」的選單（右上角＋、卡片牆空白右鍵）
+  newMenuForFolder(folder) {
     const menu = new Menu();
-    menu.addItem((i) => i.setTitle(t('Folder')).setIcon('folder-plus').onClick(() => this.newFolder(folder)));
-    menu.addSeparator();
-    menu.addItem((i) => i.setTitle(t('Note')).setIcon('file-text').onClick(() => this.newFile(folder, 'md', '')));
-    menu.addItem((i) => i.setTitle(t('Canvas')).setIcon('layout-dashboard').onClick(() => this.newFile(folder, 'canvas', '{}')));
-    menu.addItem((i) => i.setTitle(t('Base')).setIcon('database').onClick(() => this.newFile(folder, 'base', 'views:\n  - type: table\n    name: Table\n')));
+    this._menuSections(menu);
+    this._menuItem(menu, 'action-primary', (i) => i.setTitle(t('New note')).setIcon('file-text')
+      .onClick((evt) => this.createNoteIn(folder, evt)));
+    this._menuItem(menu, 'action-primary', (i) => i.setTitle(t('New folder')).setIcon('folder-plus')
+      .onClick(() => this.createFolderIn(folder)));
+    this._collectPluginMenuItems(menu, folder, true);
+    return menu;
+  }
+  async createNoteIn(folder, evt) {
+    try {
+      const file = await this.app.fileManager.createNewMarkdownFile(folder);
+      if (!file) return;
+      const newTab = !!(evt && (evt.metaKey || evt.ctrlKey));
+      await this.app.workspace.getLeaf(newTab ? 'tab' : false).openFile(file, {
+        active: true, state: { mode: 'source' }, eState: { rename: 'all' },
+      });
+    } catch (e) {
+      new Notice(t('Failed to create: {{msg}}', { msg: e && e.message ? e.message : e }));
+    }
+  }
+  async createFolderIn(folder) {
+    try {
+      const created = await this.app.fileManager.createNewFolder(folder);
+      if (!created) return;
+      const expanded = new Set(this.plugin.state.expandedFolders || []);
+      let acc = '';
+      for (const seg of created.path.split('/').slice(0, -1)) { acc = acc ? acc + '/' + seg : seg; expanded.add(acc); }
+      this.plugin.state.expandedFolders = [...expanded];
+      this._focusTreeSel = created.path;
+      this.plugin.saveState();
+      this.render();
+    } catch (e) {
+      new Notice(t('Failed to create: {{msg}}', { msg: e && e.message ? e.message : e }));
+    }
+  }
+  async copyFolder(folder) {
+    try {
+      const path = this.app.vault.getAvailablePath(folder.path);
+      await this.app.vault.copy(folder, path);
+      this.plugin.refreshViews();
+    } catch (e) {
+      new Notice(t('Action failed: {{msg}}', { msg: e && e.message ? e.message : e }));
+    }
+  }
+  newFileMenu(folder, evt) {
+    const menu = this.newMenuForFolder(folder);
     if (evt instanceof MouseEvent) menu.showAtMouseEvent(evt);
-    else menu.showAtPosition({ x: 0, y: 0 });
+    else if (evt && typeof evt.getBoundingClientRect === 'function') {
+      const r = evt.getBoundingClientRect();
+      menu.showAtPosition({ x: r.left, y: r.bottom + 4 });
+    } else {
+      menu.showAtPosition({ x: 0, y: 0 });
+    }
+  }
+
+  /* 資料夾右鍵：核心項目（New note / New folder / Rename / Make a copy / Delete）
+     ＋ 其他外掛透過 file-menu 註冊的資料夾動作；本外掛獨有的項目放在
+     「Gallery Navigator」分欄（標題項 + 平鋪項目），不折成二級選單。 */
+  folderContextMenu(folder) {
+    const menu = new Menu();
+    this._menuSections(menu);
+    this._menuItem(menu, 'action-primary', (i) => i.setTitle(t('New note')).setIcon('file-text')
+      .onClick((evt) => this.createNoteIn(folder, evt)));
+    this._menuItem(menu, 'action-primary', (i) => i.setTitle(t('New folder')).setIcon('folder-plus')
+      .onClick(() => this.createFolderIn(folder)));
+    this._collectPluginMenuItems(menu, folder, false);
+    if (folder.path && folder.path !== '/') {
+      this._menuItem(menu, 'danger', (i) => i.setTitle(t('Rename')).setIcon('pencil')
+        .onClick(() => this.app.fileManager.promptForFileRename(folder)));
+      this._menuItem(menu, 'action', (i) => i.setTitle(t('Make a copy')).setIcon('files')
+        .onClick(() => this.copyFolder(folder)));
+      this._menuItem(menu, 'danger', (i) => i.setTitle(t('Delete')).setIcon('trash').setWarning(true)
+        .onClick(() => this.app.fileManager.promptForDeletion(folder)));
+    }
+    if (this.canReveal()) {
+      this._menuItem(menu, 'system', (i) => i.setTitle(t('Reveal in Finder')).setIcon('folder-open')
+        .onClick(() => this.revealInSystem(folder)));
+    }
+    if (folder.path && folder.path !== '/') this._addGalleryFolderSection(menu, folder);
+    return menu;
+  }
+  /* 分欄標題。原生選單沒有「分欄」API，用 is-label 的停用項當標題；
+     底下所有項目同屬 view 分區，因此不會把 Gallery Navigator 再折成二級選單。 */
+  _addGalleryLabel(menu) {
+    menu.addItem((i) => {
+      i.setTitle('Gallery Navigator');
+      try { if (typeof i.setIsLabel === 'function') i.setIsLabel(true); } catch (e) {}
+      try { if (typeof i.setSection === 'function') i.setSection('view'); } catch (e) {}
+    });
+  }
+  _addGalleryFolderSection(menu, folder) {
+    const state = this.plugin.state;
+    const mobile = document.body.classList.contains('is-mobile');
+    this._addGalleryLabel(menu);
+    this._menuItem(menu, 'view', (i) => i.setTitle(t('Copy path')).setIcon('link')
+      .onClick(() => copyToClipboard(folder.path)));
+    this._menuItem(menu, 'view', (i) => i.setTitle(t('Move to…')).setIcon('folder-input')
+      .onClick(() => new FolderSuggest(this.app, (target) => this.moveItem(folder, target), folder.path).open()));
+    this._menuItem(menu, 'view', (i) => i.setTitle(t('Change icon')).setIcon('shapes')
+      .onClick(() => new IconPickerModal(
+        this.app,
+        (state.folderIcons || {})[folder.path] || '',
+        (name) => this.setFolderIconChoice(folder.path, name),
+        () => this.setFolderIconChoice(folder.path, null),
+      ).open()));
+    this._menuItem(menu, 'view', (i) => {
+      i.setTitle(t('Color')).setIcon('palette');
+      const cs = i.setSubmenu();
+      const cur = (state.folderColors || {})[folder.path] || null;
+      cs.addItem((c) => c.setTitle(t('Auto (by name)')).setChecked(!cur)
+        .onClick(() => this.setFolderColor(folder.path, null)));
+      PALETTE.forEach((p) => {
+        cs.addItem((c) => {
+          c.setTitle(t(p.label)).setIcon('circle').setChecked(cur === p.key)
+            .onClick(() => this.setFolderColor(folder.path, p.key));
+          try { if (c.iconEl) { c.iconEl.style.color = p.bg; c.iconEl.style.fill = p.bg; } } catch (e) {}
+        });
+      });
+    });
+    this._menuItem(menu, 'view', (i) => i.setTitle(this.isFavorite('folder', folder.path) ? t('Remove from favorites') : t('Add to favorites'))
+      .setIcon('star').onClick(() => this.toggleFavorite('folder', folder.path)));
+    this._menuItem(menu, 'view', (i) => i.setTitle(t('Show text preview')).setIcon('text')
+      .setChecked(!(state.noPreviewFolders || []).includes(folder.path))
+      .onClick(() => this.toggleFolderPreview(folder.path)));
+    this._menuItem(menu, 'view', (i) => {
+      const hidden = (state.hiddenFolders || []).includes(folder.path);
+      i.setTitle(hidden ? t('Unhide') : t('Hide this folder'))
+        .setIcon(hidden ? 'eye' : 'eye-off')
+        .onClick(() => this.setFolderHidden(folder.path, !hidden));
+    });
+    if (mobile) {
+      this._menuItem(menu, 'view', (i) => i.setTitle(t('Reorder folders')).setIcon('arrow-up-down')
+        .onClick(() => this.enterFolderReorderMode()));
+    }
+  }
+  /* 多選資料夾右鍵：保留原生的「新建資料夾 / 刪除」，外掛操作放在 Gallery Navigator 分欄。 */
+  multiFolderMenu(folder) {
+    const menu = new Menu();
+    this._menuSections(menu);
+    this._menuItem(menu, 'action-primary', (i) => i.setTitle(t('New folder')).setIcon('folder-plus')
+      .onClick(() => this.createFolderIn(folder)));
+    this._menuItem(menu, 'danger', (i) => i.setTitle(t('Delete')).setIcon('trash').setWarning(true)
+      .onClick(async () => {
+        for (const p of [...this.selFolders]) {
+          const f = this.app.vault.getAbstractFileByPath(p);
+          if (f instanceof TFolder) { try { await this.app.fileManager.promptForDeletion(f); } catch (e) {} }
+        }
+      }));
+    this._addGalleryLabel(menu);
+    this._menuItem(menu, 'view', (i) => i.setTitle(t('Move {{n}} folders to…', { n: this.selFolders.size }))
+      .setIcon('folder-input').onClick(() => this.moveSelectedFolders()));
+    this._menuItem(menu, 'view', (i) => i.setTitle(t('Clear selection')).setIcon('x')
+      .onClick(() => this.clearFolderSel()));
+    return menu;
   }
 
   // 新增資料夾（先問名稱）
@@ -2209,6 +2562,7 @@ class GalleryView extends ItemView {
         let acc = '';
         for (const seg of path.split('/').slice(0, -1)) { acc = acc ? acc + '/' + seg : seg; expanded.add(acc); }
         this.plugin.state.expandedFolders = [...expanded];
+        this.clearSearchState();
         this.path = path;
         this.plugin.state.lastPath = path;
         this.plugin.saveState();
@@ -3487,8 +3841,9 @@ class GalleryView extends ItemView {
     const d = this.drag;
     if (!d || !targetFolder) return false;
     // 拖曳的是「已選取的筆記」且有多選 → 批次移動全部選取
-    if (d.kind === 'note' && this.selected.size > 1 && this.selected.has(d.path)) {
-      const paths = [...this.selected];
+    // （用拖曳當下快照的 d.paths，不再回頭看 selected：拖到一半選取被改掉也不會漏搬）
+    if (d.kind === 'note' && d.paths && d.paths.length > 1) {
+      const paths = d.paths.slice();
       (async () => {
         let ok = 0, skipped = 0;
         for (const p of paths) {
@@ -3573,8 +3928,10 @@ class GalleryView extends ItemView {
      ⚠️ 收合要等動畫收完才 display:none，否則寬度動畫還沒跑就先消失。
      ⚠️ 展開要先 display:'' 再等**一幀**才放寬度：同一幀內改完，瀏覽器只會看到最終值。 */
   toggleTree(nextHidden) {
-    if (this._searchOn) {
-      this._searchTreeOpen = !nextHidden;   // 搜尋中只切這次，不寫進 data.json
+    // 手機從懸浮搜尋進畫廊時仍沿用「搜尋中暫時收起左欄」的原行為；
+    // 桌機搜尋框是常駐的，樹保持可見。
+    if (document.body.classList.contains('is-mobile') && this._searchOn) {
+      this._searchTreeOpen = !nextHidden;
     } else {
       this.plugin.state.treeCollapsed = nextHidden;
       this.plugin.saveState();
@@ -3751,77 +4108,54 @@ class GalleryView extends ItemView {
     if (nh) nh.toggleClass('gn-cluster-open', on);
   }
 
-  /* 搜尋鈕**之前**的那幾顆依序淡出，收完才執行 done()（2026-08-10）。
-     搜尋鈕與「⋯ 更多」留在原地 —— 膠囊寬度不變，只是前段換成輸入框。
-
-     ⚠️ 退場前先量下這幾顆佔的寬度並存起來（_searchFieldW），重畫後直接套給輸入框
-        → 膠囊總寬前後一致，不會抽動。用實測而不是「按鈕數 × 44」：
-        按鈕尺寸來自主題（Velocity 是 44×32），寫死等於綁死一個主題。
-     ⚠️ 刻意**等動畫真的播完才重畫**：renderInner() 第一件事就是 root.empty()，
-        DOM 一被清掉動畫就沒了，只會看到瞬間跳換。
-     ⚠️ 用 setTimeout 不用 animationend：退場的是多個元素，事件會各觸發一次還要自己數；
-        而且 reduce-motion 時根本不會有事件。 */
-  morphBarOut(before, done) {
-    const cluster = before && before.parentElement;
-    const all = cluster ? Array.from(cluster.children) : [];
-    const items = all.slice(0, all.indexOf(before));
-    if (!items.length) { done(); return; }
-
-    const first = items[0], last = items[items.length - 1];
-    this._searchFieldW = Math.round(last.offsetLeft + last.offsetWidth - first.offsetLeft);
-
-    if (!this.motionOk()) { done(); return; }
-    const STEP = 22, DUR = 140;
-    items.forEach((el, i) => {
-      el.style.setProperty('--gn-i', String(i));   // 由左而右依序退場
-      el.addClass('gn-btn-leaving');
-    });
-    window.setTimeout(done, (items.length - 1) * STEP + DUR);
-  }
-
-  // 收起工具列搜尋：輸入框先淡出，收完才換回按鈕（與進場對稱）
-  exitBarSearch() {
-    const wrap = this.contentEl.querySelector('.gn-bar-search');
-    const back = () => {
-      this._searchOn = false;
-      this._searchQ = '';
-      this._searchTreeOpen = false;   // 左欄回到「搜尋時預設收起」的初始狀態
-      this._barBtnsIn = true;         // 讓重畫後的按鈕依序進場（renderInner 消費一次）
-      this.render();
-    };
-    if (!wrap || !this.motionOk()) { back(); return; }
-    wrap.addClass('gn-bar-search-leaving');
-    window.setTimeout(back, 140);
-  }
-
-  /* 桌機：長在**膠囊內**的搜尋輸入框（2026-08-10）。
-     取代原本「按鈕開 Modal」的流程 —— 前五顆按鈕的位置換成輸入框，
-     搜尋鈕與「⋯ 更多」留在右側，膠囊總寬不變。
-     ⚠️ 輸入框在 .gn-bar 上（不在 .gn-main 內）：rerenderMain() 會 empty 掉 gn-main，
-        放進去的話每打一個字重畫結果就會失焦。 */
-  buildBarSearch(cluster) {
-    const wrap = cluster.createDiv('gn-bar-search');
-    if (this._searchFieldW) wrap.style.width = this._searchFieldW + 'px';
-    setIcon(wrap.createDiv('gn-bar-search-ic'), 'search');
-
-    const input = wrap.createEl('input', { type: 'search', cls: 'gn-bar-search-input' });
+  /* 桌機：常駐搜尋框（2026-11-18）。
+     放在 .gn-bar（不在 .gn-main）→ rerenderMain 清不到輸入框，打字不失焦。
+     搜尋時不再把整條工具列變形；樹也保留，可以邊搜邊換資料夾。 */
+  buildTopSearch(parent) {
+    const wrap = parent.createDiv('gn-top-search');
+    setIcon(wrap.createDiv('gn-top-search-ic'), 'search');
+    const input = wrap.createEl('input', { type: 'search', cls: 'gn-top-search-input' });
     input.placeholder = t('Search full text…');
     input.value = this._searchQ || '';
+    const clear = wrap.createDiv('gn-top-search-clear');
+    setIcon(clear, 'x');
+    clear.setAttr('aria-label', t('Clear search'));
+    const syncClear = () => clear.toggleClass('gn-top-search-clear-on', !!this._searchQ);
+    syncClear();
 
     let timer = null;
     const run = async () => {
       const q = input.value.trim();
+      const changed = q !== this._searchQ || !!q !== this._searchOn;
       this._searchQ = q;
+      this._searchOn = !!q;
+      if (this._syncNewBtn) this._syncNewBtn();
+      if (!changed) return;
       if (q && !this.plugin.search.ready) {
         this.rerenderMain();                    // 先顯示「建立索引中…」
         await this.plugin.search.ensureReady();
         if (input.value.trim() !== q) return;   // 建索引期間又打了字 → 交給後面那次
       }
       this.rerenderMain();
+      syncClear();
+    };
+    const reset = () => {
+      input.value = '';
+      clearTimeout(timer);
+      const changed = !!this._searchQ || this._searchOn;
+      this._searchQ = '';
+      this._searchOn = false;
+      if (this._syncNewBtn) this._syncNewBtn();
+      if (changed) this.rerenderMain();
+      syncClear();
+      input.focus();
     };
     input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 150); });
-    input.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !isImeKey(e)) this.exitBarSearch(); });
-    setTimeout(() => input.focus(), 0);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !isImeKey(e)) { e.stopPropagation(); reset(); }
+      else if (e.key === 'Enter') { e.preventDefault(); clearTimeout(timer); run(); }
+    });
+    clear.onclick = (e) => { e.stopPropagation(); reset(); };
   }
 
   /* 搜尋輸入列。2026-08-10 抽成方法：桌機要掛在右欄（.gn-maincol）、手機掛在 root，
@@ -3837,7 +4171,7 @@ class GalleryView extends ItemView {
     const sclose = srow.createDiv('gn-search-clear');
     setIcon(sclose, 'x');
     sclose.setAttr('title', t('Close search'));
-    const close = () => { this._searchOn = false; this._searchQ = ''; this._searchTreeOpen = false; this.render(); };
+    const close = () => { this._searchOn = false; this._searchQ = ''; this.render(); };
     sclose.onclick = close;
 
     let timer = null;
@@ -3854,6 +4188,31 @@ class GalleryView extends ItemView {
     sinput.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 150); });
     sinput.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !isImeKey(e)) close(); });
     setTimeout(() => sinput.focus(), 0);
+  }
+
+  /* 左樹名稱過濾（2026-11-18）：回傳 {visible, open}，沒有查詢時回傳 null。
+     visible＝命中的資料夾＋它們的祖先；open＝需要自動展開的祖先，讓命中項目一定看得到。 */
+  treeFilterSets() {
+    const q = String(this._treeFilter || '').trim().toLowerCase();
+    if (!q) return null;
+    const visible = new Set();
+    const open = new Set();
+    const walk = (folder, ancestors) => {
+      const self = String(folder.name || '').toLowerCase().includes(q);
+      let child = false;
+      for (const sub of subFolders(folder)) {
+        if (walk(sub, ancestors.concat(folder.path))) child = true;
+      }
+      const hit = self || child;
+      if (hit) {
+        visible.add(folder.path);
+        for (const a of ancestors) { visible.add(a); open.add(a); }
+        if (child) open.add(folder.path);
+      }
+      return hit;
+    };
+    for (const sub of subFolders(this.app.vault.getRoot())) walk(sub, []);
+    return { visible, open };
   }
 
   renderInner() {
@@ -3912,60 +4271,60 @@ class GalleryView extends ItemView {
 
     const state = this.plugin.state;
 
-    /* --- 頂部工具列：左＝資料夾相關（對齊左欄）、右＝卡片相關（靠右） --- */
-    /* ===== 版面骨架（2026-08-10 桌機重組）=====
-       桌機：**取消橫跨兩欄的頂部工具列**，按鈕依所屬欄位收進各自的欄頭
-         .gn-bar.gn-bar-merged ＝ 麵包屑 + 一塊 .nav-buttons-container（全部按鈕）
-         底下才是 .gn-split（左樹 / 分隔桿 / 卡片牆）
-       手機：完全維持原本的底部 .gn-bar 與 [bar][searchRow][split] 的 DOM 順序
-             （使用者確認手機現況已好，2026-08-10 一行都不要動）。
-       ⚠️ 按鈕一律用 mkBarBtn() 建立，不要再直接 createDiv('gn-btn')。 */
+    /* --- 頂部工具列（2026-11-18 重整）---
+       桌機：常駐一條，左組＝導覽、右組＝內容。
+         左：資料夾/標籤切換（之後加過濾與收合）
+         右：搜尋框 · 排序 · 顯示選項 · 新建
+       不再用 Obsidian 的 hover 膠囊：要滑過去才展開，常用動作等於被藏起來。
+       手機：維持原本的底部 .gn-bar，一行都不動。 */
     const isMobileUI = document.body.classList.contains('is-mobile');
-    // 搜尋時預設收起左欄（搜尋結果是全 vault，資料夾樹沒意義）；
-    // 但搜尋中仍可用收合鈕手動展開（this._searchTreeOpen 當覆寫，不寫進 data.json）
-    const treeHidden = this._searchOn ? !this._searchTreeOpen : !!state.treeCollapsed;
+    const treeHidden = (isMobileUI && this._searchOn) ? !this._searchTreeOpen : !!state.treeCollapsed;
 
-    /* 桌機：一條橫跨兩欄的合併欄，**只放按鈕**，全部集中在同一個群組（2026-08-10）。
-       以前是 barL／barR 兩段、左段寬度還要用 JS 對齊左欄，麵包屑也塞在右段
-       （那兩段已於 2026-08-11 一併移除，見下方說明）。
-       麵包屑已移回右欄的牆內表頭（.gn-main-head，與手機同一條路徑）——
-       this._barTitle 保持 null，renderNoteWall() 的 useBarTitle 就會自動走牆內那條。
-       手機：維持原本的底部兩段式工具列，一行都不動。 */
     const bar = root.createDiv('gn-bar');
     this._barTitle = null;
-    if (!isMobileUI) bar.addClass('gn-bar-merged');
-    /* （2026-08-11）手機的 barL / barR 兩個 .gn-bar-group 已移除。
-       它們原本代表「左段＝資料夾工具、右段＝卡片工具」，但 CSS 早就寫成
-       `.is-mobile .gn-bar-group { display: contents }` —— 兩段在手機**不產生任何
-       視覺分隔**，所有按鈕都是 .gn-bar 的直接子元素、由 space-evenly 均分。
-       也就是說它們只剩「決定 DOM 順序」這個作用，而順序現在已由下方的 order
-       陣列統一決定。桌機從 08-10 起就走 cluster、根本沒用到這兩個 group。 */
-    /* 搜尋列必須在 .gn-main 外面（rerenderMain 會 empty 掉它 → 輸入框失焦），
-       且 DOM 順序固定是 [bar][searchRow][split]。
-       ⚠️ **手機限定**：桌機的輸入框已經改成長在工具列裡（見下方 buildBarSearch）。 */
+    if (!isMobileUI) bar.addClass('gn-topbar');
+    /* 手機搜尋列必須在 .gn-main 外面，且 DOM 順序固定 [bar][searchRow][split]。 */
     if (isMobileUI && this._searchOn) this.buildSearchRow(root);
 
-    /* 按鈕群組容器：桌機包成原生的 .nav-header > .nav-buttons-container，直接吃主題給的
-       膠囊底、hover 展開（Velocity 用 interpolate-size 對 fit-content 做尺寸補間）、按壓縮放。
-       ⚠️ 必須是 .nav-header 的**直接子元素** —— Velocity 的展開規則寫成
-          `.nav-header:hover > .nav-buttons-container`，少了父層就永遠停在 height:0
-          且子元素 filter:opacity(0) ＝ 整排按鈕隱形，而且不會報錯。 */
-    /* 桌機搜尋開啟時，膠囊**前段**換成輸入框（搜尋鈕與「⋯ 更多」留在右側），
-       膠囊本身照建，寬度不變。手機維持原況：按鈕開 GnSearchModal。 */
-    const barSearch = !isMobileUI && this._searchOn;
-    const cluster = isMobileUI ? null : bar.createDiv('nav-header').createDiv('nav-buttons-container');
-    /* ⚠️ 按鈕**先建進暫存容器**，最後才依平台的順序 append（見本段末尾的 order 陣列）。
-       桌機與手機的排列不同：桌機是一整塊、順序由使用者指定（2026-08-10）；
-       手機是左右兩段、順序必須維持原況（使用者確認手機不動）。
-       若照「建立順序＝DOM 順序」寫，改桌機排序就會連帶動到手機。 */
-    const tray = createDiv();
+    /* 桌機的標籤篩選面板放在工具列下方、卡片捲動區外 → 開著時永遠看得到。 */
+    this._tagbarHost = isMobileUI ? null : root.createDiv('gn-top-tagbar-host');
 
-    const btn = {};   // key → 元素，最後依序 append
+    /* 按鈕先建進暫存容器，最後才依平台 append（手機順序不變）。 */
+    const tray = createDiv();
+    const btn = {};
+    const topLeft = isMobileUI ? null : bar.createDiv('gn-top-left');
+    const topRight = isMobileUI ? null : bar.createDiv('gn-top-right');
 
     /* --- 兩欄：左巢狀資料夾樹 + 右筆記牆 --- */
     const split = root.createDiv('gn-split');
     const tree = split.createDiv('gn-tree');             // 左欄容器（flex 直向）
     tree.style.flex = '0 0 ' + (state.treeWidth || 232) + 'px';
+    /* 左樹名稱過濾（桌機）：輸入列在捲動區外，過濾時不會跟著列表重畫。 */
+    if (!isMobileUI && this._treeFilterOn && state.leftMode !== 'tag') {
+      const fw = tree.createDiv('gn-tree-filter');
+      setIcon(fw.createDiv('gn-tree-filter-ic'), 'filter');
+      const input = fw.createEl('input', { type: 'search', cls: 'gn-tree-filter-input' });
+      input.placeholder = t('Filter folders…');
+      input.value = this._treeFilter || '';
+      let filterTimer = null;
+      input.addEventListener('input', () => {
+        clearTimeout(filterTimer);
+        filterTimer = setTimeout(() => {
+          if (!input.isConnected) return;
+          this._treeFilter = input.value;
+          this.refreshTree();
+        }, 80);
+      });
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && !isImeKey(e)) {
+          e.stopPropagation();
+          this._treeFilterOn = false;
+          this._treeFilter = '';
+          this.render();
+        }
+      });
+      setTimeout(() => input.focus(), 0);
+    }
     const treeScroll = tree.createDiv('gn-tree-scroll');  // 可捲動的資料夾/標籤區
     /* 資料夾多選的操作條：擺在捲動區「之後」＝固定貼左欄底部，不隨樹捲動。
        預設 display:none，updateFolderSelBar() 有選取時才打開。 */
@@ -3985,11 +4344,10 @@ class GalleryView extends ItemView {
       // 涵蓋所有列：資料夾列、root 列、最愛列（都是 .gn-tnode）＋ 最愛標題 ＋ 操作條
       if (el && el.closest && el.closest('.gn-tnode, .gn-fav-head, .gn-tselbar')) return null;
       if (this.folderReorderMode) return null;   // 排序模式中長按不開選單（出口在底部操作條）
-      const menu = new Menu();
-      menu.addItem((i) => i.setTitle(t('New folder')).setIcon('folder-plus')
-        .onClick(() => this.newFolder(this.app.vault.getRoot())));
+      const menu = this.newMenuForFolder(this.app.vault.getRoot());
       if (document.body.classList.contains('is-mobile')) {
-        menu.addItem((i) => i.setTitle(t('Reorder folders')).setIcon('arrow-up-down')
+        this._addGalleryLabel(menu);
+        this._menuItem(menu, 'view', (i) => i.setTitle(t('Reorder folders')).setIcon('arrow-up-down')
           .onClick(() => this.enterFolderReorderMode()));
       }
       return menu;
@@ -4004,20 +4362,16 @@ class GalleryView extends ItemView {
        桌機收合後分隔桿會留成左邊界的感應區（滑過去就有紫線與箭頭），
        手機那顆本來就被 .is-mobile .gn-collapse-btn { display:none } 藏著 —— 兩邊都用不到了。 */
 
-    /* ===== 搜尋（全文，中文 ICU 斷詞 + bigram；結果直接呈現為卡牆）=====
-       桌機（2026-08-10）：點下去**整條工具列變成搜尋欄** —— 按鈕先依序淡出，
-       動畫收完才重畫成輸入框（見 morphBarOut / buildBarSearch）。
-       手機：維持原況，開 GnSearchModal 懸浮搜尋。 */
-    const searchBtn = btn.search = this.mkBarBtn(tray, 'search',
-      barSearch ? t('Close search') : t('Search notes (full-text popup)'),
-      { on: barSearch });
-    searchBtn.onclick = () => {
-      if (barSearch) { this.exitBarSearch(); return; }   // 搜尋中 → 這顆變成關閉
-      this.plugin.search.ensureReady();                  // 背景先把索引建起來
-      if (isMobileUI) { new GnSearchModal(this.app, this.plugin).open(); return; }
-      // 前五顆依序淡出、量好寬度，收完才重畫成輸入框
-      this.morphBarOut(searchBtn, () => { this._searchOn = true; this._searchQ = ''; this.render(); });
-    };
+    /* ===== 搜尋 =====
+       桌機：搜尋框常駐在工具列右組（見 buildTopSearch），打字即時篩選，不再把整條工具列變形。
+       手機：維持原況，這顆開 GnSearchModal 懸浮搜尋。 */
+    if (isMobileUI) {
+      const searchBtn = btn.search = this.mkBarBtn(tray, 'search', t('Search notes (full-text popup)'));
+      searchBtn.onclick = () => {
+        this.plugin.search.ensureReady();
+        new GnSearchModal(this.app, this.plugin).open();
+      };
+    }
 
     // root 的雙欄底色分界推到「樹寬 + 分隔桿 9px」＝右欄起點，灰色涵蓋分隔桿區，不留白縫。
     // （2026-08-10：原本這支還要同步工具列左段的寬度，桌機工具列取消後只剩這件事。）
@@ -4035,9 +4389,30 @@ class GalleryView extends ItemView {
       { on: state.leftMode === 'tag' });
     modeBtn.onclick = () => {
       state.leftMode = state.leftMode === 'tag' ? 'folder' : 'tag';
+      this.clearSearchState();
+      if (state.leftMode === 'tag') { this._treeFilterOn = false; this._treeFilter = ''; }
       this.plugin.saveState();
       this.render();
     };
+
+    /* 左樹工具（2026-11-18）。桌機限定；手機維持原況。 */
+    if (!isMobileUI) {
+      if (state.leftMode !== 'tag') {
+        const filterBtn = btn.filter = this.mkBarBtn(tray, 'filter', t('Filter folders'), { on: this._treeFilterOn });
+        filterBtn.onclick = () => {
+          this._treeFilterOn = !this._treeFilterOn;
+          if (!this._treeFilterOn) this._treeFilter = '';
+          this.render();
+        };
+      }
+      const collapseBtn = btn.collapse = this.mkBarBtn(tray, 'minimize-2', t('Collapse all folders'));
+      collapseBtn.onclick = () => {
+        state.expandedFolders = [];
+        state.expandedTags = [];
+        this.plugin.saveState();
+        this.refreshTree();
+      };
+    }
 
     // 同步定位鈕已移入「⋯ 更多」面板（2026-07-19）
 
@@ -4065,24 +4440,26 @@ class GalleryView extends ItemView {
           點下去會建到上次的資料夾 —— 已知的既有行為，要修的話應該是「保留版位但
           disabled」，而不是隱藏。 */
     const inFolderView = !this._searchOn && state.leftMode !== 'tag';
-    if (isMobileUI ? !this._searchOn : state.leftMode !== 'tag') {
+    /* 桌機：新建鈕常駐，搜尋中／標籤模式變灰不可用（版位不跳）。
+       手機：維持原況（標籤模式仍顯示）。 */
+    if (isMobileUI ? !this._searchOn : true) {
       const newBtn = btn.new = this.mkBarBtn(tray, 'file-plus',
         t('Create here (folder / note / canvas / base)'),
         { disabled: !inFolderView });
-      /* 工具列這顆走共用的清單浮層（與排序、標籤同一種外觀與行為）。
-         牆面空白處右鍵仍走原生 Menu（newFileMenu）—— 那裡沒有錨點按鈕可以對齊，
-         而且右鍵跳原生選單本來就是使用者的預期。 */
-      if (inFolderView) newBtn.onclick = (e) => {
+      this._newBtn = newBtn;
+      this._syncNewBtn = () => {
+        if (isMobileUI) return;   // 手機維持原況（含標籤模式仍可點）
+        const ok = !this._searchOn && state.leftMode !== 'tag';
+        newBtn.toggleClass('is-disabled', !ok);
+        newBtn.setAttr('aria-disabled', ok ? 'false' : 'true');
+      };
+      this._syncNewBtn();
+      newBtn.onclick = (e) => {
         e.stopPropagation();
+        if (!isMobileUI && (this._searchOn || state.leftMode === 'tag')) return;
         const f = this.folderAt(this.path);
         if (!f) return;
-        this.openListPopover(newBtn, [
-          { icon: 'folder-plus', label: t('Folder'), onClick: () => this.newFolder(f) },
-          null,
-          { icon: 'file-text', label: t('Note'), onClick: () => this.newFile(f, 'md', '') },
-          { icon: 'layout-dashboard', label: t('Canvas'), onClick: () => this.newFile(f, 'canvas', '{}') },
-          { icon: 'database', label: t('Base'), onClick: () => this.newFile(f, 'base', 'views:\n  - type: table\n    name: Table\n') },
-        ]);
+        this.newFileMenu(f, newBtn);
       };
     }
 
@@ -4120,44 +4497,35 @@ class GalleryView extends ItemView {
     }
 
     // 右：⋯ 更多（排序 / 卡片大小滑桿 / 重新整理 → 單層浮動面板）
-    const moreBtn = btn.more = this.mkBarBtn(tray, 'more-horizontal', t('More (card layout / size / corners)'));
+    const moreBtn = btn.more = this.mkBarBtn(tray, isMobileUI ? 'more-horizontal' : 'sliders-horizontal', t('View options (layout / size / corners)'));
     moreBtn.onclick = (e) => { e.stopPropagation(); this.openMorePopover(moreBtn); };
 
-    /* 依平台把按鈕排進實際的容器（見上面 tray 的說明）。
-       ⚠️ **兩個平台共用同一份順序**（2026-08-11）：新建 · 標籤模式 · 排序 · 搜尋 · 更多。
-          以前手機是另一份「左段 mode·eye／右段 search·new·more」，等於同一條工具列
-          維護兩份排列，改一邊很容易忘了另一邊。現在只有這一個陣列。
-          平台差異只剩**容器**（手機直接掛在 .gn-bar，桌機掛在原生膠囊 cluster）
-          與**外觀**（mkBarBtn 只在桌機掛 .clickable-icon —— 那個 class 在 app.css
-          有手機專屬的觸控尺寸規則，掛上去手機會跟著變，CSS 蓋不掉）。 */
-    const BAR_ORDER = ['new', 'mode', 'sort', 'search', 'more'];
+    /* 依平台放入容器：手機沿用原本的底部排列；桌機分成導覽／內容兩組。 */
     if (isMobileUI) {
-      for (const k of BAR_ORDER) if (btn[k]) bar.appendChild(btn[k]);
+      for (const k of ['new', 'mode', 'sort', 'search', 'more']) if (btn[k]) bar.appendChild(btn[k]);
     } else {
-      if (barSearch) {
-        /* 搜尋中：前段換成輸入框，只留搜尋與更多。
-           ⚠️ 膠囊要強制展開 —— 平常是 .nav-header:hover 才展開，
-              滑鼠移開輸入框就會縮回小球，打字打到一半整條不見。 */
-        cluster.parentElement.addClass('gn-cluster-open');
-        this.buildBarSearch(cluster);
-        for (const k of ['search', 'more']) if (btn[k]) cluster.appendChild(btn[k]);
-      } else {
-      for (const k of BAR_ORDER) {
-        if (btn[k]) cluster.appendChild(btn[k]);
-      }
-      }
-      /* 從搜尋欄切回按鈕時，讓按鈕依序進場（與 morphBarOut 的退場對稱）。
-         旗標由 buildBarSearch 的 close() 設定，**用一次就清掉** —— 否則之後每次
-         整頁重畫（換資料夾、拖卡片…）按鈕都會再抖一次。 */
-      if (this._barBtnsIn) {
-        this._barBtnsIn = false;
-        if (this.motionOk()) {
-          Array.from(cluster.children).forEach((el, i) => {
-            el.style.setProperty('--gn-i', String(i));
-            el.addClass('gn-btn-entering');
-          });
-        }
-      }
+      for (const k of ['mode', 'filter', 'collapse']) if (btn[k]) topLeft.appendChild(btn[k]);
+
+      /* 常駐：目前路徑 + 數量 + 標籤篩選。以前這些都在牆內表頭，往下捲就看不到。 */
+      const topCtx = topRight.createDiv('gn-top-context');
+      this._topCrumbEl = topCtx.createDiv('gn-top-crumb');
+      this._topCountEl = topCtx.createSpan('gn-head-count');
+      this._topCountEl.style.display = 'none';
+      const tagBtn = this._topTagBtn = this.mkBarBtn(topRight, 'tags', t('Tags in this folder'), { cls: 'gn-top-tag', key: 'tags' });
+      tagBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (this._searchQ || this.plugin.state.leftMode === 'tag') return;
+        if (!this.folderTags().length) return;
+        this._tagOpen = !this._tagOpen;
+        const bar = this._tagbarHost && this._tagbarHost.querySelector('.gn-tagbar');
+        if (bar) bar.toggleClass('gn-tagbar-open', !!this._tagOpen);
+        this.syncTopTagButton();
+      };
+      topRight.appendChild(topCtx);
+      topRight.appendChild(tagBtn);
+      this.syncTopTagButton();
+      this.buildTopSearch(topRight);
+      for (const k of ['sort', 'more', 'new']) if (btn[k]) topRight.appendChild(btn[k]);
     }
 
     // 鍵盤可及性：.gn-btn 是 div，預設不可 focus → 補上 button 語意與 Enter/Space 觸發。
@@ -4312,6 +4680,7 @@ class GalleryView extends ItemView {
     const folderColors = state.folderColors || {};
     const hiddenSet = new Set(state.hiddenFolders || []);
     const expanded = new Set(state.expandedFolders || []);
+    const fs = this.treeFilterSets();
     // ★ 最愛捷徑（feature 3）：兩種模式都顯示在最上方
     this.renderFavorites(treeScroll);
 
@@ -4329,6 +4698,7 @@ class GalleryView extends ItemView {
     rootRow.createSpan('gn-tname').setText(this.app.vault.getName());  // 動態 vault 名（原本寫死）
     rootRow.onclick = () => this.navigate('');
     this.wireMoveTarget(rootRow, '', 'gn-tmove');
+    this.wireContextMenu(rootRow, () => this.folderContextMenu(this.app.vault.getRoot()));
 
     // 遞迴建樹（每列：caret + 縮圖 + 名稱 + 數量）
     const buildLevel = (parentFolder, depth) => {
@@ -4336,11 +4706,12 @@ class GalleryView extends ItemView {
       const fitems = subFolders(parentFolder).map((sub) =>
         ({ folder: sub, name: sub.name, count: folderFileCount(sub) }));
       const ordered = orderFolders(fitems, (state.folderOrder || {})[orderKey]);
-      const visible = this.showHidden ? ordered : ordered.filter((it) => !hiddenSet.has(it.folder.path));
+      let visible = this.showHidden ? ordered : ordered.filter((it) => !hiddenSet.has(it.folder.path));
+      if (fs) visible = visible.filter((it) => fs.visible.has(it.folder.path));
 
       for (const it of visible) {
         const hasKids = subFolders(it.folder).length > 0;
-        const isOpen = expanded.has(it.folder.path);
+        const isOpen = expanded.has(it.folder.path) || (!!fs && fs.open.has(it.folder.path));
         const isHidden = hiddenSet.has(it.folder.path);
 
         const row = treeScroll.createDiv('gn-tnode');
@@ -4394,7 +4765,7 @@ class GalleryView extends ItemView {
           this.inlineRenameFolder(it.folder, nameEl);
         };
 
-        // 點整列 = 只選取（右欄載入）；展開/收合交給箭頭
+        // 點整列 = 選取；桌機同時展開（比照系統檔案樹）。收合交給箭頭。
         row.onclick = (e) => {
           /* 排序模式：點列不做事。手指在把手附近放開很容易被當成點了這一列，
              手機上那會直接滑去右邊的卡片牆，排到一半畫面就跑了。
@@ -4402,7 +4773,7 @@ class GalleryView extends ItemView {
           if (this.folderReorderMode) { e.preventDefault(); return; }
           /* ── 多選優先（2026-08-18）──
              桌機用修飾鍵，手機用 folderSelMode（長按選單進入）。擺在最前面：
-             一旦在多選，這一下就不該再導覽或觸發改名。 */
+             一旦在多選，這一下就不該再導覽。 */
           if (this.folderSelMode || e.metaKey || e.ctrlKey) {
             e.preventDefault();
             this.toggleFolderSel(it.folder.path);
@@ -4416,18 +4787,16 @@ class GalleryView extends ItemView {
           // 沒按修飾鍵的普通點擊 → 離開多選，回到單選導覽（比照 Finder）
           if (this.selFolders.size) this.clearFolderSel();
 
-          /* 已選取的資料夾，再點一次「名稱」→ 原地改名（2026-08-01）。
-             照 Finder 的慢速雙擊邏輯：第一下先選取，第二下才進編輯，
-             所以不會犧牲「點名稱＝選取」這個最常用的動作。
-             ⚠️ 手機不啟用：觸控要連續點同一個資料夾導覽很常見，
-                容易誤觸；手機改名走長按選單的「重新命名」。 */
-          if (!document.body.classList.contains('is-mobile')
-              && this.path === it.folder.path
-              && e.target === nameEl && !nameEl._editing) {
-            e.preventDefault();
-            this.inlineRenameFolder(it.folder, nameEl);
-            return;
+          /* 系統檔案樹行為：點一下就選取並展開（已展開則保持展開）。
+             收合只走箭頭，避免使用者點資料夾看內容時被反覆收合。 */
+          if (hasKids) {
+            const expandedSet = new Set(state.expandedFolders || []);
+            if (!expandedSet.has(it.folder.path)) {
+              expandedSet.add(it.folder.path);
+              state.expandedFolders = [...expandedSet];
+            }
           }
+          this.clearSearchState();
           this.path = it.folder.path;
           state.lastPath = it.folder.path;
           this._focusTreeSel = it.folder.path;   // 選後聚焦此列，讓 Enter 能改名
@@ -4439,89 +4808,10 @@ class GalleryView extends ItemView {
 
         this.wireContextMenu(row, () => {
           if (this.folderReorderMode) return null;   // 排序模式中長按不開選單
-          const menu = new Menu();
-          /* ── 多選中：整個選單換成「對這批」的操作（2026-08-18）──
-             選了 5 個資料夾卻跳出單一資料夾的改名/配色，會讓人搞不清楚要對誰動手。
-             只有在這一列**確實在選取集裡**才切換；右鍵一個沒選到的列＝一般單選選單。 */
           if (this.selFolders.size > 1 && this.selFolders.has(it.folder.path)) {
-            const n = this.selFolders.size;
-            menu.addItem((i) => i.setTitle(t('Move {{n}} folders to…', { n })).setIcon('folder-input')
-              .onClick(() => this.moveSelectedFolders()));
-            menu.addSeparator();
-            menu.addItem((i) => i.setTitle(t('Clear selection')).setIcon('x')
-              .onClick(() => this.clearFolderSel()));
-            return menu;
+            return this.multiFolderMenu(it.folder);
           }
-          if (hasKids) {
-            menu.addItem((i) => i.setTitle(isOpen ? t('Collapse') : t('Expand')).setIcon(isOpen ? 'chevron-down' : 'chevron-right')
-              .onClick(() => this.toggleExpand(it.folder.path)));
-          }
-          /* 手機的多選入口。手機沒有 Cmd/Shift，不給這一項就完全進不了多選；
-             桌機用修飾鍵更快，但也留著 —— 有人就是不想記快捷鍵。 */
-          menu.addItem((i) => i.setTitle(t('Select multiple')).setIcon('check-check')
-            .onClick(() => this.enterFolderSelMode(it.folder.path)));
-          /* 手機的排序入口（2026-09-30）。桌機直接拖列就能排，不需要這一項；
-             手機沒有拖放事件，得先進排序模式、用把手拖。 */
-          if (document.body.classList.contains('is-mobile')) {
-            menu.addItem((i) => i.setTitle(t('Reorder folders')).setIcon('arrow-up-down')
-              .onClick(() => this.enterFolderReorderMode()));
-          }
-          menu.addItem((i) => {
-            i.setTitle(t('Create here')).setIcon('file-plus');
-            const sub = i.setSubmenu();
-            sub.addItem((s) => s.setTitle(t('Folder')).setIcon('folder-plus').onClick(() => this.newFolder(it.folder)));
-            sub.addSeparator();
-            sub.addItem((s) => s.setTitle(t('Note')).setIcon('file-text').onClick(() => this.newFile(it.folder, 'md', '')));
-            sub.addItem((s) => s.setTitle(t('Canvas')).setIcon('layout-dashboard').onClick(() => this.newFile(it.folder, 'canvas', '{}')));
-            sub.addItem((s) => s.setTitle(t('Base')).setIcon('database').onClick(() => this.newFile(it.folder, 'base', 'views:\n  - type: table\n    name: Table\n')));
-          });
-          menu.addItem((i) => i.setTitle(t('Rename')).setIcon('pencil').onClick(() => this.inlineRenameFolder(it.folder, nameEl)));
-          menu.addItem((i) => i.setTitle(t('Copy path')).setIcon('link').onClick(() => copyToClipboard(it.folder.path)));
-          menu.addItem((i) => i.setTitle(t('Move to…')).setIcon('folder-input').onClick(() =>
-            new FolderSuggest(this.app, (target) => this.moveItem(it.folder, target), it.folder.path).open()));
-          // 自訂圖示（2026-08-11）：放在「顏色」旁邊，兩者都是這個資料夾的外觀設定
-          menu.addItem((i) => i.setTitle(t('Change icon')).setIcon('shapes')
-            .onClick(() => new IconPickerModal(
-              this.app,
-              (state.folderIcons || {})[it.folder.path] || '',
-              (name) => this.setFolderIconChoice(it.folder.path, name),
-              () => this.setFolderIconChoice(it.folder.path, null),
-            ).open()));
-          menu.addItem((i) => {
-            i.setTitle(t('Color')).setIcon('palette');
-            const sub = i.setSubmenu();
-            const cur = folderColors[it.folder.path] || null;
-            sub.addItem((s) => s.setTitle(t('Auto (by name)')).setChecked(!cur)
-              .onClick(() => this.setFolderColor(it.folder.path, null)));
-            PALETTE.forEach((p) => {
-              sub.addItem((s) => {
-                s.setTitle(t(p.label)).setIcon('circle').setChecked(cur === p.key)
-                  .onClick(() => this.setFolderColor(it.folder.path, p.key));
-                // 把圓點圖示塗成該顏色（取代原本的 emoji 色塊）
-                try { if (s.iconEl) { s.iconEl.style.color = p.bg; s.iconEl.style.fill = p.bg; } } catch (e) {}
-              });
-            });
-          });
-          menu.addSeparator();
-          // 加入最愛（feature 3）
-          menu.addItem((i) => i.setTitle(this.isFavorite('folder', it.folder.path) ? t('Remove from favorites') : t('Add to favorites'))
-            .setIcon('star').onClick(() => this.toggleFavorite('folder', it.folder.path)));
-          // 顯示內文開關（feature 2）
-          menu.addItem((i) => i.setTitle(t('Show text preview')).setIcon('text')
-            .setChecked(!(state.noPreviewFolders || []).includes(it.folder.path))
-            .onClick(() => this.toggleFolderPreview(it.folder.path)));
-          menu.addSeparator();
-          if (isHidden) {
-            menu.addItem((i) => i.setTitle(t('Unhide')).setIcon('eye').onClick(() => this.setFolderHidden(it.folder.path, false)));
-          } else {
-            menu.addItem((i) => i.setTitle(t('Hide this folder')).setIcon('eye-off').onClick(() => this.setFolderHidden(it.folder.path, true)));
-          }
-          if (this.canReveal()) {
-            menu.addItem((i) => i.setTitle(t('Reveal in Finder')).setIcon('folder-open').onClick(() => this.revealInSystem(it.folder)));
-          }
-          menu.addSeparator();
-          menu.addItem((i) => i.setTitle(t('Delete folder')).setIcon('trash').setWarning(true).onClick(() => this.confirmDelete(it.folder)));
-          return menu;
+          return this.folderContextMenu(it.folder);
         });
 
         // 拖曳：可拖；作為落點時分三區（上緣＝排前面、下緣＝排後面、中間＝移進去）
@@ -4592,6 +4882,9 @@ class GalleryView extends ItemView {
       }
     };
     buildLevel(this.app.vault.getRoot(), 1);
+    if (fs && !fs.visible.size) {
+      treeScroll.createDiv('gn-empty gn-tree-empty').setText(t('No matching folders'));
+    }
     }
     /* 資料夾多選的收尾（2026-08-18）。標籤模式沒有資料夾列可選 → 整組清掉，
        否則切去標籤模式再切回來，操作條會掛著一批看不見的選取。
@@ -4732,6 +5025,12 @@ class GalleryView extends ItemView {
 
   // 搜尋結果 → 卡牆。keepOrder=true 保住 BM25 相關性排名（不套日期排序）
   renderSearchWall(main) {
+    if (!document.body.classList.contains('is-mobile')) {
+      if (this._tagbarHost) this._tagbarHost.empty();
+      this.updateTopContext(this.folderAt(this.path), t('Search results'));
+      this.syncTopTagButton();
+      if (this._topCountEl) this._topCountEl.style.display = 'none';
+    }
     const idx = this.plugin.search;
     if (!idx.ready) { main.createDiv('gn-empty').setText(t('Building index…')); return; }
     const hits = idx.search(this._searchQ, 0);          // 0 = 不設上限（卡牆本來就懶載入）
@@ -5132,6 +5431,14 @@ class GalleryView extends ItemView {
     for (const el of this.cardElsFor(path)) el.toggleClass('gn-card-selected', this.selected.has(path));
     this.updateSelBar();
   }
+  /* 桌機點一下只選這一張（檔案總管行為），把其他卡片取消選取。 */
+  selectOnly(path) {
+    this.clearSel();
+    this.selected.add(path);
+    for (const el of this.cardElsFor(path)) el.addClass('gn-card-selected');
+    this.selAnchor = path;
+    this.updateSelBar();
+  }
   rangeSel(a, b) {
     const order = this._cardOrder || [];
     let ia = order.indexOf(a), ib = order.indexOf(b);
@@ -5165,14 +5472,26 @@ class GalleryView extends ItemView {
     const n = this.selected.size;
     if (!n) { bar.style.display = 'none'; return; }
     bar.style.display = '';
-    bar.createSpan('gn-selbar-count').setText(t('{{n}} selected', { n }));
-    const mk = (label, icon, fn, warn) => {
+    const countEl = bar.createSpan('gn-selbar-count').setText(t('{{n}} selected', { n }));
+    // 桌機：把「怎麼拖出到其他程式」掛在計數上，免得只有設定頁看得到（手機不適用）
+    const dragOut = this.dragOutMode();
+    if (dragOut === 'ctrl' || dragOut === 'alt') {
+      countEl.setAttr('title', t('Hold {{mod}} while dragging a card to other apps', {
+        mod: dragOut === 'alt' ? 'Alt / Option' : 'Ctrl / Cmd',
+      }));
+    }
+    // 圖示 + 文字：只有圖示時得逐顆 hover 才知道是什麼（2026-11-18）。
+    // 手機卡片沒有多選（點一下即開啟），文字標籤只給桌機。
+    const mobile = document.body.classList.contains('is-mobile');
+    const mk = (label, icon, fn, warn, short) => {
       const b = bar.createDiv('gn-selbar-btn' + (warn ? ' gn-selbar-warn' : ''));
       setIcon(b, icon); b.setAttr('title', label);
+      b.setAttr('aria-label', label);
+      if (!mobile) b.createSpan('gn-selbar-label').setText(short || label);
       b.onclick = (e) => { e.stopPropagation(); fn(e); };
     };
     mk(t('Select all'), 'check-check', () => this.selectAll());
-    mk(t('Copy wiki links (one per line)'), 'link', () => this.copySelectedLinks());
+    mk(t('Copy wiki links (one per line)'), 'link', () => this.copySelectedLinks(), false, t('Copy links'));
     mk(t('Move to…'), 'folder-input', () => this.moveSelected());
     mk(t('Tags…'), 'tags', () => {
       const files = [...this.selected]
@@ -5488,6 +5807,10 @@ class GalleryView extends ItemView {
   // 建一個瀑布流 grid。一面牆可以有多個（連結 / 反向連結各一區）
   makeGrid(container) {
     const grid = container.createDiv('gn-grid');
+    // 點空白處取消選取（檔案總管行為）；卡片自己有 click handler，target 不會是 grid
+    grid.addEventListener('click', (e) => {
+      if (e.target === grid && this.selected.size) this.clearSel();
+    });
     // 換資料夾／換標籤時，整面牆淡入一次（同一個位置重畫則不動，避免捲動時閃）
     if (this.motionOk()) {
       const key = (this.plugin.state.leftMode === 'tag' ? 'tag:' : 'dir:') + (this.path || '');
@@ -5759,17 +6082,51 @@ class GalleryView extends ItemView {
         // 範圍選取的錨點：優先用上次複選的卡，沒有就用目前開啟中的卡
         this.rangeSel(this.selAnchor || this.activePath, it.file.path);
       }
-      else if (this.selected.size) { this.clearSel(); }
-      else { this.openNote(it.file, false); }
+      /* 桌機比照檔案總管：點一下只選取，雙擊才開啟（2026-11-18）。
+         手機沒有雙擊手勢，維持點一下開啟，否則卡片會完全打不開。 */
+      else if (document.body.classList.contains('is-mobile')) {
+        this.openNote(it.file, false);
+      }
+      else {
+        this.selectOnly(it.file.path);
+      }
     };
+    card.addEventListener('dblclick', (e) => {
+      if (ndrag) return;
+      if (document.body.classList.contains('is-mobile')) return;   // 手機單擊已開啟
+      if (e.metaKey || e.ctrlKey || e.shiftKey) return;            // 修飾鍵留給選取
+      this.openNote(it.file, false);
+    });
 
-    // 拖曳搬移：把筆記拖到左側資料夾列
+    // 拖曳：拖到左側資料夾列（內部搬移），或按修飾鍵把整批檔案拖出到其他程式
     card.setAttr('draggable', 'true');
     card.addEventListener('dragstart', (e) => {
       ndrag = true;
-      this.drag = { kind: 'note', path: it.file.path };   // GN 內部用（拖到樹狀圖搬檔案）
-      card.addClass('gn-card-dragging');
+      /* 被拖的卡不在選取集裡 → 只選它再拖（檔案總管行為）。
+         否則拖一張沒選取的卡，會莫名其妙拖走上一批選取的其他檔案。 */
+      if (!this.selected.has(it.file.path)) this.selectOnly(it.file.path);
+
+      const selectedFiles = [...this.selected]
+        .map((p) => asFile(this.app, p))
+        .filter((f) => f instanceof TFile);
+      if (!selectedFiles.some((f) => f.path === it.file.path)) selectedFiles.push(it.file);
+      const batch = selectedFiles.length > 1 ? selectedFiles.map((f) => f.path) : null;
+      this.drag = { kind: 'note', path: it.file.path, paths: batch };   // GN 內部用（拖到樹狀圖搬檔案）
+      // 整批都要看起來在動；只有被抓的那張變淡會像沒選到其他的
+      for (const f of selectedFiles) {
+        for (const el of this.cardElsFor(f.path)) el.addClass('gn-card-dragging');
+      }
       if (e.dataTransfer) e.dataTransfer.effectAllowed = 'all';
+
+      /* 拖出到系統：startDrag 會接管整次拖曳，成功就不再走 Obsidian 的內部拖曳。 */
+      if (this.wantsDragOut(e) && this.startFileDrag(selectedFiles)) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.drag = null;                 // 系統拖曳不會觸發我們自己的 dragend
+        this.clearCardDragMarks();
+        setTimeout(() => { ndrag = false; }, 0);
+        return;
+      }
 
       /* 讓 Canvas / 編輯器 / 其他外掛也收得到（2026-08-01）。
          以前只設了 effectAllowed，dataTransfer 裡什麼都沒放 → 卡片只能在 GN 內部拖，
@@ -5779,6 +6136,7 @@ class GalleryView extends ItemView {
            dragFile(evt, file, source) 會 ① 把 obsidian:// 網址寫進 dataTransfer
                                         ② 回傳 { type:'file', file, icon, title } 描述物件
            再交給 onDragStart(evt, draggable)。
+         多選時改用 dragFiles，Canvas 才拿得到「多個檔案」而不是只有被抓的那一張。
          Canvas 是用 dragManager.handleDrop 接收，走同一條路才會變成「檔案節點」，
          而不是純文字節點。
 
@@ -5787,8 +6145,14 @@ class GalleryView extends ItemView {
             至少還能拖出一個文字節點，不會整個沒反應。 */
       try {
         const dm = this.app.dragManager;
-        if (dm && typeof dm.dragFile === 'function' && typeof dm.onDragStart === 'function') {
-          dm.onDragStart(e, dm.dragFile(e, it.file, 'gallery-navigator'));
+        if (dm && typeof dm.onDragStart === 'function') {
+          if (selectedFiles.length > 1 && typeof dm.dragFiles === 'function') {
+            dm.onDragStart(e, dm.dragFiles(e, selectedFiles, 'gallery-navigator'));
+          } else if (typeof dm.dragFile === 'function') {
+            dm.onDragStart(e, dm.dragFile(e, it.file, 'gallery-navigator'));
+          } else if (e.dataTransfer) {
+            e.dataTransfer.setData('text/plain', '[[' + it.file.basename + ']]');
+          }
         } else if (e.dataTransfer) {
           e.dataTransfer.setData('text/plain', '[[' + it.file.basename + ']]');
         }
@@ -5798,7 +6162,7 @@ class GalleryView extends ItemView {
     });
     card.addEventListener('dragend', () => {
       this.drag = null;
-      card.removeClass('gn-card-dragging');
+      this.clearCardDragMarks();
       setTimeout(() => { ndrag = false; }, 0);
     });
 
@@ -5990,6 +6354,67 @@ class GalleryView extends ItemView {
 
   // keepOrder: 保持傳入順序，不套日期排序、不把釘選浮到最前
   //            （搜尋結果必須維持 BM25 相關性排名，一排序就毀了）
+  /* 桌機常駐工具列路徑（2026-11-18）：vault / … / 上一層 / 目前。
+     只顯示最後兩層，深目錄不會把標題擠爆；點任一層直接跳過去。 */
+  /* 桌機常駐工具列的「目前位置」：資料夾路徑 + 檢視模式（搜尋/標籤）。
+     只在桌機存在；手機仍用牆內表頭。 */
+  updateTopContext(folder, modeText) {
+    const wrap = this._topCrumbEl;
+    if (!wrap) return;
+    wrap.empty();
+    this.renderWallCrumbs(wrap, folder || this.folderAt(this.path));
+    if (modeText) wrap.createSpan('gn-top-mode').setText(modeText);
+  }
+  /* 桌機常駐工具列的標籤篩選鈕：跟著目前資料夾/搜尋狀態更新可用性與亮燈。 */
+  syncTopTagButton() {
+    const b = this._topTagBtn;
+    if (!b) return;
+    const n = (!this._searchQ && this.plugin.state.leftMode !== 'tag') ? this.folderTags().length : 0;
+    const ok = n > 0;
+    b.toggleClass('is-disabled', !ok);
+    b.setAttr('aria-disabled', ok ? 'false' : 'true');
+    b.toggleClass('is-active', ok && (!!this._tagOpen || !!(this._tagFilter && this._tagFilter.size)));
+    b.setAttr('aria-label', n ? t('Tags in this folder') + ' · ' + n : t('Tags in this folder'));
+  }
+  // 內嵌標籤面板：表頭下方、卡片上方；開合只切 class，不重畫卡片。
+  renderTagbar(container) {
+    const tags = this.folderTags();
+    if (!tags.length) return;
+    const bar = container.createDiv('gn-tagbar');
+    bar.toggleClass('gn-tagbar-open', !!this._tagOpen);
+    const inner = bar.createDiv('gn-tagbar-inner');
+    this.fillTagChips(inner, tags);
+    if (this._tagFilter && this._tagFilter.size) {
+      const clear = inner.createDiv('gn-tagbar-clear');
+      clear.setText(t('Clear'));
+      clear.onclick = () => { this._tagFilter = new Set(); this.rerenderMain(); };
+    }
+  }
+
+  renderWallCrumbs(head, folder) {
+    const vault = this.app.vault.getName();
+    const path = folder && folder.path && folder.path !== '/' ? folder.path : '';
+    const parts = path ? path.split('/') : [];
+    const wrap = head.createDiv('gn-crumbs');
+    const add = (label, target, current) => {
+      const el = wrap.createSpan({ cls: 'gn-crumb' + (current ? ' gn-crumb-cur' : ''), text: label });
+      el.setAttr('title', target || vault);
+      if (current) el.setAttr('aria-current', 'page');
+      else el.onclick = (e) => { e.stopPropagation(); this.navigate(target); };
+    };
+    add(vault, '', !parts.length);
+    if (parts.length > 2) {
+      wrap.createSpan({ cls: 'gn-crumb-sep', text: '/' });
+      const more = wrap.createSpan({ cls: 'gn-crumb-more', text: '…' });
+      more.setAttr('title', path);
+    }
+    const start = Math.max(0, parts.length - 2);
+    for (let i = start; i < parts.length; i++) {
+      wrap.createSpan({ cls: 'gn-crumb-sep', text: '/' });
+      add(parts[i], parts.slice(0, i + 1).join('/'), i === parts.length - 1);
+    }
+  }
+
   renderNoteWall(container, folder, filesOverride, headOverride, keepOrder, emptyText) {
     const app = this.app;
 
@@ -5997,112 +6422,96 @@ class GalleryView extends ItemView {
     const flatten = !filesOverride && folder && this.plugin.state.flattenFolders;
 
     const headText = headOverride || (folder && folder.path && folder.path !== '/' ? folder.path : this.app.vault.getName());
-    /* 牆內表頭（2026-08-10 改）：左邊**只顯示當下資料夾名**（原本是整串可點的麵包屑，
-       層級深時很長；上下層改用左欄的樹導覽），右邊放「這面牆」專屬的控制項。 */
-    const head = container.createDiv('gn-main-head');
     const isMobileUI = document.body.classList.contains('is-mobile');
-    if (!headOverride && folder) {
-      const name = folder.path && folder.path !== '/'
-        ? folder.path.split('/').pop()
-        : this.app.vault.getName();
-      head.createSpan({ cls: 'gn-bar-title-text', text: name });
-    } else {
-      head.createSpan({ cls: 'gn-bar-title-text', text: headText });
-    }
+    const state = this.plugin.state;
 
-    /* 右上角：標籤 / 版面 / 攤平（2026-08-10 從工具列移來，2026-08-11 手機也沿用）。
-       三者只作用於「目前這面牆」，放在牆的表頭比放在全域工具列更貼近作用範圍。
-       只在資料夾檢視出現 —— 搜尋牆與標籤模式下它們都沒有作用（理由見工具列那段）。
-       手機沿用同一套之後，「⋯ 更多」裡的標籤膠囊與攤平列就是重複入口，已一併移除。
-       ⚠️ 手機的表頭標題本來是置中的（2026-07-20 指定）。有按鈕時要改成左靠，
-          否則標題只會在「扣掉按鈕之後的剩餘空間」裡置中 → 看起來偏左、像沒對齊。
-          用 state class 而不是 :has()（上架規範禁用，見 07-31）。 */
-    if (!headOverride && folder && this.plugin.state.leftMode !== 'tag') {
-      head.addClass('gn-head-has-acts');
-      const acts = head.createDiv('gn-head-acts');
-      const nTags = this.folderTags().length;
-      // 亮起的條件是「面板展開中」**或**「正在篩選」—— 面板收起來時仍看得出有套篩選
-      const filtering = !!(this._tagFilter && this._tagFilter.size);
-      const tagsBtn = this.mkBarBtn(acts, 'tags',
-        nTags ? t('Tags in this folder') + ' · ' + nTags : t('Tags in this folder'),
-        { on: filtering || !!this._tagOpen, disabled: !nTags, cls: 'gn-head-btn', key: 'tags' });
-      if (nTags) tagsBtn.onclick = (e) => {
-        e.stopPropagation();
-        this._tagOpen = !this._tagOpen;
-        // 只切 class，不重畫 —— 卡片會被 CSS 的高度補間自然推下去
-        const bar = this._main && this._main.querySelector('.gn-tagbar');
-        if (bar) bar.toggleClass('gn-tagbar-open', !!this._tagOpen);
-        tagsBtn.toggleClass('is-active', !!this._tagOpen || !!(this._tagFilter && this._tagFilter.size));
-      };
+    if (isMobileUI) {
+      /* 手機維持原本的牆內表頭（名稱 + 標籤/版面/攤平），一行都不動。 */
+      const head = container.createDiv('gn-main-head');
+      if (!headOverride && folder) {
+        const name = folder.path && folder.path !== '/'
+          ? folder.path.split('/').pop()
+          : this.app.vault.getName();
+        head.createSpan({ cls: 'gn-bar-title-text', text: name });
+      } else {
+        head.createSpan({ cls: 'gn-bar-title-text', text: headText });
+      }
+      if (!headOverride && folder && state.leftMode !== 'tag') {
+        const acts = head.createDiv('gn-head-acts');
+        const nTags = this.folderTags().length;
+        head.addClass('gn-head-has-acts');
+        const filtering = !!(this._tagFilter && this._tagFilter.size);
+        const tagsBtn = this.mkBarBtn(acts, 'tags',
+          nTags ? t('Tags in this folder') + ' · ' + nTags : t('Tags in this folder'),
+          { on: filtering || !!this._tagOpen, disabled: !nTags, cls: 'gn-head-btn', key: 'tags' });
+        if (nTags) tagsBtn.onclick = (e) => {
+          e.stopPropagation();
+          this._tagOpen = !this._tagOpen;
+          const bar = this._main && this._main.querySelector('.gn-tagbar');
+          if (bar) bar.toggleClass('gn-tagbar-open', !!this._tagOpen);
+          tagsBtn.toggleClass('is-active', !!this._tagOpen || !!this._tagFilter.size);
+        };
 
-      /* 這個資料夾的圖片卡版面（2026-08-10）。全域預設在「⋯ 更多」，這裡是**單一資料夾的覆寫**。
-         · 圖示 = 目前**實際生效**的版面（含從祖先繼承來的）
-         · 只有「這個資料夾自己有指定」時才亮起 —— 繼承來的不亮，
-           否則設了 inbox/ig 之後底下每個子資料夾都亮，看不出是誰設的
-         · 選單第一項是「跟隨全域」（清掉覆寫）—— 沒有這個三態的話，
-           點過一次就永久脫離全域預設，之後改全域對它無效（設定繼承的經典陷阱） */
-      const own = this.ownLayout();
-      const eff = this._layout || 'overlay';
-      const LAYOUTS_H = [['overlay', 'image', 'Photo'], ['stacked', 'frame', 'Museum'], ['editorial', 'type', 'Editor']];
-      const effIcon = (LAYOUTS_H.find((x) => x[0] === eff) || LAYOUTS_H[0])[1];
-      const effName = (LAYOUTS_H.find((x) => x[0] === eff) || LAYOUTS_H[0])[2];
-      const layoutBtn = this.mkBarBtn(acts, effIcon,
-        t('Image card layout') + ' · ' + t(effName),
-        { on: !!own, cls: 'gn-head-btn', key: 'layout' });
-      layoutBtn.onclick = (e) => {
-        e.stopPropagation();
-        const key = this.path || '';
-        const rows = [{
-          icon: 'rotate-ccw',
-          label: t('Follow global'),
-          checked: !own,
-          onClick: () => {
-            const map = Object.assign({}, this.plugin.state.folderLayouts || {});
-            delete map[key];
-            this.plugin.state.folderLayouts = map;
-            this.plugin.saveState();
-            this.render();
-          },
-        }];
-        for (const [k, icon, label] of LAYOUTS_H) {
-          rows.push({
-            icon, label: t(label), checked: own === k,
+        const own = this.ownLayout();
+        const eff = this._layout || 'overlay';
+        const LAYOUTS_H = [['overlay', 'image', 'Photo'], ['stacked', 'frame', 'Museum'], ['editorial', 'type', 'Editor']];
+        const effIcon = (LAYOUTS_H.find((x) => x[0] === eff) || LAYOUTS_H[0])[1];
+        const effName = (LAYOUTS_H.find((x) => x[0] === eff) || LAYOUTS_H[0])[2];
+        const layoutBtn = this.mkBarBtn(acts, effIcon,
+          t('Image card layout') + ' · ' + t(effName),
+          { on: !!own, cls: 'gn-head-btn', key: 'layout' });
+        layoutBtn.onclick = (e) => {
+          e.stopPropagation();
+          const key = this.path || '';
+          const rows = [{
+            icon: 'rotate-ccw',
+            label: t('Follow global'),
+            checked: !own,
             onClick: () => {
               const map = Object.assign({}, this.plugin.state.folderLayouts || {});
-              map[key] = k;
+              delete map[key];
               this.plugin.state.folderLayouts = map;
               this.plugin.saveState();
-              this.render();   // 版面會改卡片結構與欄寬下限 → 整頁重畫
+              this.render();
             },
-          });
-        }
-        this.openListPopover(layoutBtn, rows);
-      };
+          }];
+          for (const [k, icon, label] of LAYOUTS_H) {
+            rows.push({
+              icon, label: t(label), checked: own === k,
+              onClick: () => {
+                const map = Object.assign({}, this.plugin.state.folderLayouts || {});
+                map[key] = k;
+                this.plugin.state.folderLayouts = map;
+                this.plugin.saveState();
+                this.render();
+              },
+            });
+          }
+          this.openListPopover(layoutBtn, rows);
+        };
 
-      const flatBtn = this.mkBarBtn(acts, 'layers',
-        t('Flatten: include all subfolders'),
-        { on: !!this.plugin.state.flattenFolders, cls: 'gn-head-btn', key: 'flatten' });
-      flatBtn.onclick = () => {
-        this.plugin.state.flattenFolders = !this.plugin.state.flattenFolders;
-        this.plugin.saveState();
-        this.render();
-      };
+        const flatBtn = this.mkBarBtn(acts, 'layers',
+          t('Flatten: include all subfolders'),
+          { on: !!this.plugin.state.flattenFolders, cls: 'gn-head-btn', key: 'flatten' });
+        flatBtn.onclick = () => {
+          this.plugin.state.flattenFolders = !this.plugin.state.flattenFolders;
+          this.plugin.saveState();
+          this.render();
+        };
 
-      /* 內嵌標籤面板：表頭下方、卡片上方。展開時把卡片往下推（見 .gn-tagbar 的說明）。
-         ⚠️ 一律建立（只要有標籤），開合只切 class —— 這樣按鈕的 onclick 不必重畫，
-            也就沒有「重畫後錨點失效」的問題。 */
-      if (nTags) {
-        const bar = container.createDiv('gn-tagbar');
-        bar.toggleClass('gn-tagbar-open', !!this._tagOpen);
-        const inner = bar.createDiv('gn-tagbar-inner');
-        this.fillTagChips(inner, this.folderTags());
-        if (this._tagFilter && this._tagFilter.size) {
-          const clear = inner.createDiv('gn-tagbar-clear');
-          clear.setText(t('Clear'));
-          clear.onclick = () => { this._tagFilter = new Set(); this.rerenderMain(); };
-        }
+        if (nTags) this.renderTagbar(container);
+      }
+    } else {
+      /* 桌機：路徑、數量、標籤鈕都在常駐工具列；牆內不再有會捲走的表頭。 */
+      if (this._tagbarHost) this._tagbarHost.empty();
+      this.updateTopContext(folder || this.folderAt(this.path),
+        this._searchQ ? t('Search results') : (state.leftMode === 'tag' ? headText : ''));
+      this.syncTopTagButton();
+      if (this._tagbarHost && !headOverride && folder && state.leftMode !== 'tag') {
+        if (this.folderTags().length) this.renderTagbar(this._tagbarHost);
       }
     }
+
     // 狀態膠囊（攤平／標籤篩選）獨立成一列，放在卡片牆頂端、不再塞進工具列標題列（2026-07-20）：
     //   多選標籤時字串會很長（#a #b #c ✕），塞在工具列會把麵包屑擠爆＝破格。
     //   獨立一列後可自行換行（flex-wrap），長度再長也不影響工具列。
@@ -6138,6 +6547,12 @@ class GalleryView extends ItemView {
     ];
     // 此資料夾是否隱藏內文預覽
     const perFolderHide = folder ? (this.plugin.state.noPreviewFolders || []).includes(folder.path) : false;
+
+    if (this._topCountEl && !isMobileUI) {
+      this._topCountEl.style.display = '';
+      this._topCountEl.setText(String(notes.length));
+      this._topCountEl.setAttr('title', t('{{n}} items', { n: notes.length }));
+    }
 
     this.beginWall(container);
     const { grid, masonry } = this.makeGrid(container);
@@ -6277,7 +6692,8 @@ class GallerySettingTab extends PluginSettingTab {
     const save = () => this.plugin.saveState();
     const reloadHint = () => new Notice(t('Takes effect after reloading the plugin (or restarting Obsidian)'), 5000);
 
-    /* ══ 0. 語言 ══ */
+    /* ══ 0. 一般 ══ */
+    this.group(containerEl, t('General'));
     new Setting(containerEl).setName(t('Language'))
       .setDesc(t('Interface language. Auto follows the Obsidian language setting.'))
       .addDropdown((d) => {
@@ -6302,6 +6718,21 @@ class GallerySettingTab extends PluginSettingTab {
       .addToggle((tg) => tg.setValue(!!st.autoCardColor)
         .onChange((v) => { st.autoCardColor = v; save(); this.plugin.refreshViews(); }));
 
+    /* 全域圖片版面（2026-11-18 從「⋯ 更多」搬回設定頁）。
+       工具列的「視圖」只負責單一資料夾的覆寫，兩者不再混在同一個選單。 */
+    new Setting(containerEl)
+      .setName(t('Default image card layout'))
+      .setDesc(t('Used for folders without their own override. To override one folder, open the view menu on that folder.'))
+      .addDropdown((d) => {
+        d.addOption('overlay', t('Photo'));
+        d.addOption('stacked', t('Museum'));
+        d.addOption('editorial', t('Editor'));
+        d.setValue(GN_LAYOUTS.includes(st.imageCardLayout) ? st.imageCardLayout : 'overlay');
+        d.onChange((v) => { st.imageCardLayout = v; save(); this.plugin.refreshViews(); });
+      });
+
+    /* ══ 2. 內容與快取 ══ */
+    this.group(containerEl, t('Content & cache'));
     new Setting(containerEl)
       .setName(t('Excalidraw thumbnails'))
       .setDesc(t('Renders each Excalidraw drawing into its card through the Excalidraw plugin, in the background, and only for cards on screen. With the plugin off, drawings stay plain text cards.'))
@@ -6379,11 +6810,28 @@ class GallerySettingTab extends PluginSettingTab {
     };
     void refreshCacheDesc();
 
+    /* ══ 3. 操作 ══ */
+    this.group(containerEl, t('Behavior'));
     new Setting(containerEl)
       .setName(t('Open notes without focusing the editor'))
       .setDesc(t('Notes opened from the gallery start unfocused, so a first-line image embed stays rendered instead of expanding to markdown. Click into the note to edit as usual.'))
       .addToggle((tg) => tg.setValue(st.openUnfocused !== false)
         .onChange((v) => { st.openUnfocused = v; save(); }));
+
+    /* 拖出到系統（2026-11-18）。Electron 的原生拖曳無法和 Obsidian 內部的
+       drop target 並存（見 dragOut 的說明），所以只能靠修飾鍵分流；
+       「永遠」= 放棄卡片拖到資料夾的內部搬移，換取直接拖出。 */
+    new Setting(containerEl)
+      .setName(t('Drag cards out to other apps'))
+      .setDesc(t('Hold the modifier while dragging a card to drag the real files into other programs (chat, mail, browser uploads). Without it, dragging still moves the selected notes to folders inside the gallery. "Always" turns off dropping cards onto folders.'))
+      .addDropdown((d) => {
+        d.addOption('ctrl', t('Ctrl / Cmd'));
+        d.addOption('alt', t('Alt / Option'));
+        d.addOption('always', t('Always'));
+        d.addOption('off', t('Off'));
+        d.setValue(st.dragOut || 'ctrl');
+        d.onChange((v) => { st.dragOut = v; save(); });
+      });
 
     new Setting(containerEl)
       .setName(t('Match the mobile drawer to the gallery'))
@@ -6397,6 +6845,8 @@ class GallerySettingTab extends PluginSettingTab {
       .addToggle((tg) => tg.setValue(st.enableLightboxActions !== false)
         .onChange((v) => { st.enableLightboxActions = v; save(); }));
 
+    /* ══ 4. 效能 ══ */
+    this.group(containerEl, t('Performance'));
     new Setting(containerEl)
       .setName(t('Virtualized card wall'))
       .setDesc(t('In large folders, keeps only the cards near the viewport in the DOM and recycles the rest. Greatly reduces memory and scrolling lag. Turn off if you see layout jumps while scrolling.'))
@@ -7045,7 +7495,7 @@ class GalleryPlugin extends Plugin {
        本機那份優先；升級後第一次執行還沒有 → 沿用 data.json 裡的（以前都存在那裡）。 */
     const disk = (await this.loadData()) || {};
     const localSaved = this.loadLocalState();
-    this.state = Object.assign({ lastPath: '', cardWidth: 120, sort: 'new', folderOrder: {}, hiddenFolders: [], folderColors: {}, expandedFolders: [], treeWidth: 232, treeCollapsed: false, syncActive: true, leftMode: 'folder', activeTag: '', expandedTags: [], cardColors: {}, noPreviewFolders: [], folderLayouts: {}, favorites: [], pinnedCards: [], assetTags: {}, lang: '', openUnfocused: true, imageCardLayout: 'stacked', autoCardColor: false, excalidrawThumbs: true, videoCovers: true, videoCoverMaxMB: 0, coverCacheMB: 0 }, disk, localSaved ? splitState(localSaved).local : null);
+    this.state = Object.assign({ lastPath: '', cardWidth: 120, sort: 'new', folderOrder: {}, hiddenFolders: [], folderColors: {}, expandedFolders: [], treeWidth: 232, treeCollapsed: false, syncActive: true, leftMode: 'folder', activeTag: '', expandedTags: [], cardColors: {}, noPreviewFolders: [], folderLayouts: {}, favorites: [], pinnedCards: [], assetTags: {}, lang: '', openUnfocused: true, imageCardLayout: 'stacked', autoCardColor: false, excalidrawThumbs: true, videoCovers: true, videoCoverMaxMB: 0, coverCacheMB: 0, dragOut: 'ctrl' }, disk, localSaved ? splitState(localSaved).local : null);
     /* 舊版 dev 把封面快取上限存在 xcalCacheMB（2026-11-16 同日改名為 coverCacheMB）。
        不繼承的話，調過上限的人會悄悄回到預設值（桌機 200MB、手機 50MB）。
        ⚠️ 只有在「舊版寫過、新版還來不及寫」時才套用：一旦 data.json 有 coverCacheMB
@@ -7372,28 +7822,37 @@ class GalleryPlugin extends Plugin {
        同一項也會出現在檔案總管的資料夾右鍵，順便涵蓋。 */
   setupFolderFileMenu() {
     this.registerEvent(this.app.workspace.on('file-menu', (menu, file) => {
+      if (this._suppressGalleryFolderMenu) return;   // 畫廊自己在組選單時避免遞迴
       if (!(file instanceof TFolder)) return;
-      menu.addItem((i) => i.setTitle(t('Open in Gallery Navigator')).setIcon(GN_ICON_ID)
-        .onClick(async () => {
-          await this.activateView();
-          const path = file.path && file.path !== '/' ? file.path : '';
-          // 展開祖先，選到的資料夾在左樹才看得到（同 syncToFile 的做法）
-          const expanded = new Set(this.state.expandedFolders || []);
-          let acc = '';
-          for (const seg of (path ? path.split('/') : [])) {
-            acc = acc ? acc + '/' + seg : seg;
-            expanded.add(acc);
-          }
-          this.state.expandedFolders = [...expanded];
-          this.state.leftMode = 'folder';   // 標籤模式下也要切回資料夾模式，否則導覽沒有意義
-          for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
-            const v = leaf.view;
-            if (v instanceof GalleryView) {
-              v._searchOn = false; v._searchQ = '';   // 搜尋牆顯示中的話先收掉，不然看不到資料夾
-              v.navigate(path);
+      menu.addItem((i) => {
+        i.setTitle('Gallery Navigator');
+        try { if (typeof i.setIsLabel === 'function') i.setIsLabel(true); } catch (e) {}
+        try { if (typeof i.setSection === 'function') i.setSection('view'); } catch (e) {}
+      });
+      menu.addItem((i) => {
+        try { if (typeof i.setSection === 'function') i.setSection('view'); } catch (e) {}
+        i.setTitle(t('Open in Gallery Navigator')).setIcon(GN_ICON_ID)
+          .onClick(async () => {
+            await this.activateView();
+            const path = file.path && file.path !== '/' ? file.path : '';
+            // 展開祖先，選到的資料夾在左樹才看得到（同 syncToFile 的做法）
+            const expanded = new Set(this.state.expandedFolders || []);
+            let acc = '';
+            for (const seg of (path ? path.split('/') : [])) {
+              acc = acc ? acc + '/' + seg : seg;
+              expanded.add(acc);
             }
-          }
-        }));
+            this.state.expandedFolders = [...expanded];
+            this.state.leftMode = 'folder';   // 標籤模式下也要切回資料夾模式，否則導覽沒有意義
+            for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
+              const v = leaf.view;
+              if (v instanceof GalleryView) {
+                v._searchOn = false; v._searchQ = '';   // 搜尋牆顯示中的話先收掉，不然看不到資料夾
+                v.navigate(path);
+              }
+            }
+          });
+      });
     }));
   }
 
