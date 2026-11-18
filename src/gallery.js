@@ -1620,6 +1620,7 @@ class GalleryView extends ItemView {
     }
     this.plugin.state.expandedFolders = [...expanded];
     this.activePath = file.path;
+    this.clearSearchState();
     this.path = folderPath;
     this.plugin.state.lastPath = folderPath;
     this.plugin.saveState();
@@ -1741,8 +1742,16 @@ class GalleryView extends ItemView {
   }
 
   // 切到某個資料夾（根目錄列、最愛捷徑、麵包屑、右鍵「跳到資料夾」都走這裡）
+  // 離開搜尋（呼叫端負責重畫；工具列輸入框會跟著重建）
+  clearSearchState() {
+    this._searchOn = false;
+    this._searchQ = '';
+    this._searchTreeOpen = false;
+  }
+
   navigate(path) {
     this._pendingAnchor = null;   // 使用者自己選了資料夾 → 取消待辦的定位，別等一下亂跳
+    this.clearSearchState();      // 搜尋是暫時狀態：點資料夾就回到資料夾牆（搜尋框是常駐的）
     this.path = path;
     this.plugin.state.lastPath = path;
     this._tagFilter = new Set();   // 換資料夾 → 清掉上一夾的標籤篩選
@@ -2022,38 +2031,88 @@ class GalleryView extends ItemView {
       pop.createDiv('gn-more-sep');
     }
 
-    /* ── 圖片卡版面（2026-08-10 從設定頁移入）──
-       有封面的卡片，標題與日期怎麼擺。兩個平台都有：手機也吃得到這個版面差異
-       （editorial 在手機是固定 2 欄），設定頁那份已移除，這裡是唯一入口。 */
-    pop.createDiv('gn-more-label').setText(t('Image card layout'));
-    const curLayout = GN_LAYOUTS.includes(state.imageCardLayout) ? state.imageCardLayout : 'overlay';
-    /* ⚠️ 左邊的 key（overlay / stacked / editorial）是**存進 data.json 的值**，
-       不能改 —— 改了既有使用者的設定會失效。這裡只換顯示名稱：
-       用場景命名取代描述式的長句（2026-08-10 使用者定名）。
-         Photo   ＝ 文字疊在圖上，整面看起來就是一牆照片
-         Museum  ＝ 圖在上、說明在下，像展品旁的標示牌
-         Editor  ＝ 小縮圖＋大日期的索引卡，文字為主 */
+    /* ── 圖片卡版面（2026-11-18 收攏）──
+       桌機：這裡只放**本資料夾的覆寫**，全域預設搬回設定頁。
+       手機：維持原況（全域值在這裡、本夾覆寫在牆頭），避免動到已確認的手機版。
+       兩個入口分不清「本夾 / 全域」正是上一版最難用的地方。 */
+    const isMobileUI = document.body.classList.contains('is-mobile');
     const LAYOUTS = [
       ['overlay', 'image', 'Photo'],        // 一張照片本身
       ['stacked', 'frame', 'Museum'],       // 畫框：作品 + 下方標示牌
       ['editorial', 'type', 'Editor'],      // 字體 T：文字為主
     ];
-    for (const [key, icon, label] of LAYOUTS) {
-      const row = pop.createDiv('gn-more-row');
-      row.toggleClass('gn-more-row-on', key === curLayout);
-      setIcon(row.createSpan('gn-more-icon'), icon);
-      row.createSpan('gn-more-text').setText(t(label));
-      const mark = row.createSpan('gn-more-check');
-      if (key === curLayout) setIcon(mark, 'check');
-      row.onclick = () => {
-        state.imageCardLayout = key;
+    if (isMobileUI) {
+      pop.createDiv('gn-more-label').setText(t('Image card layout'));
+      const curLayout = GN_LAYOUTS.includes(state.imageCardLayout) ? state.imageCardLayout : 'overlay';
+      for (const [key, icon, label] of LAYOUTS) {
+        const row = pop.createDiv('gn-more-row');
+        row.toggleClass('gn-more-row-on', key === curLayout);
+        setIcon(row.createSpan('gn-more-icon'), icon);
+        row.createSpan('gn-more-text').setText(t(label));
+        const mark = row.createSpan('gn-more-check');
+        if (key === curLayout) setIcon(mark, 'check');
+        row.onclick = () => {
+          state.imageCardLayout = key;
+          this.plugin.saveState();
+          this.closeMorePopover();
+          this.render();
+        };
+      }
+      pop.createDiv('gn-more-sep');
+    } else if (!this._searchOn && state.leftMode !== 'tag') {
+      const own = this.ownLayout();
+      pop.createDiv('gn-more-label').setText(t('Image card layout') + ' · ' + t('This folder'));
+      const rows = [{
+        icon: 'rotate-ccw',
+        label: t('Follow global'),
+        checked: !own,
+        onClick: () => {
+          const map = Object.assign({}, state.folderLayouts || {});
+          delete map[this.path || ''];
+          state.folderLayouts = map;
+          this.plugin.saveState();
+          this.closeMorePopover();
+          this.render();
+        },
+      }];
+      for (const [key, icon, label] of LAYOUTS) {
+        rows.push({
+          icon, label: t(label), checked: own === key,
+          onClick: () => {
+            const map = Object.assign({}, state.folderLayouts || {});
+            map[this.path || ''] = key;
+            state.folderLayouts = map;
+            this.plugin.saveState();
+            this.closeMorePopover();
+            this.render();
+          },
+        });
+      }
+      for (const r of rows) {
+        const row = pop.createDiv('gn-more-row');
+        row.toggleClass('gn-more-row-on', !!r.checked);
+        setIcon(row.createSpan('gn-more-icon'), r.icon);
+        row.createSpan('gn-more-text').setText(r.label);
+        const mark = row.createSpan('gn-more-check');
+        if (r.checked) setIcon(mark, 'check');
+        row.onclick = r.onClick;
+      }
+
+      /* 攤平：含子資料夾。以前在牆頭，現在只有這一個入口。 */
+      const flatRow = pop.createDiv('gn-more-row');
+      flatRow.toggleClass('gn-more-row-on', !!state.flattenFolders);
+      setIcon(flatRow.createSpan('gn-more-icon'), 'layers');
+      flatRow.createSpan('gn-more-text').setText(t('Flatten: include all subfolders'));
+      const flatMark = flatRow.createSpan('gn-more-check');
+      if (state.flattenFolders) setIcon(flatMark, 'check');
+      flatRow.onclick = () => {
+        state.flattenFolders = !state.flattenFolders;
         this.plugin.saveState();
         this.closeMorePopover();
-        // 版面會改卡片結構與欄寬下限 → 整頁重畫（卡片大小滑桿的檔位也要跟著重算）
         this.render();
       };
+      pop.createDiv('gn-more-sep');
     }
-    pop.createDiv('gn-more-sep');
 
     /* ── 卡片大小：**吸附式**滑桿（2026-08-10 改）──
        手機不顯示（手機是固定欄數，用上面的「手機的卡片欄數」）。
@@ -2289,6 +2348,7 @@ class GalleryView extends ItemView {
         let acc = '';
         for (const seg of path.split('/').slice(0, -1)) { acc = acc ? acc + '/' + seg : seg; expanded.add(acc); }
         this.plugin.state.expandedFolders = [...expanded];
+        this.clearSearchState();
         this.path = path;
         this.plugin.state.lastPath = path;
         this.plugin.saveState();
@@ -3654,8 +3714,10 @@ class GalleryView extends ItemView {
      ⚠️ 收合要等動畫收完才 display:none，否則寬度動畫還沒跑就先消失。
      ⚠️ 展開要先 display:'' 再等**一幀**才放寬度：同一幀內改完，瀏覽器只會看到最終值。 */
   toggleTree(nextHidden) {
-    if (this._searchOn) {
-      this._searchTreeOpen = !nextHidden;   // 搜尋中只切這次，不寫進 data.json
+    // 手機從懸浮搜尋進畫廊時仍沿用「搜尋中暫時收起左欄」的原行為；
+    // 桌機搜尋框是常駐的，樹保持可見。
+    if (document.body.classList.contains('is-mobile') && this._searchOn) {
+      this._searchTreeOpen = !nextHidden;
     } else {
       this.plugin.state.treeCollapsed = nextHidden;
       this.plugin.saveState();
@@ -3832,77 +3894,54 @@ class GalleryView extends ItemView {
     if (nh) nh.toggleClass('gn-cluster-open', on);
   }
 
-  /* 搜尋鈕**之前**的那幾顆依序淡出，收完才執行 done()（2026-08-10）。
-     搜尋鈕與「⋯ 更多」留在原地 —— 膠囊寬度不變，只是前段換成輸入框。
-
-     ⚠️ 退場前先量下這幾顆佔的寬度並存起來（_searchFieldW），重畫後直接套給輸入框
-        → 膠囊總寬前後一致，不會抽動。用實測而不是「按鈕數 × 44」：
-        按鈕尺寸來自主題（Velocity 是 44×32），寫死等於綁死一個主題。
-     ⚠️ 刻意**等動畫真的播完才重畫**：renderInner() 第一件事就是 root.empty()，
-        DOM 一被清掉動畫就沒了，只會看到瞬間跳換。
-     ⚠️ 用 setTimeout 不用 animationend：退場的是多個元素，事件會各觸發一次還要自己數；
-        而且 reduce-motion 時根本不會有事件。 */
-  morphBarOut(before, done) {
-    const cluster = before && before.parentElement;
-    const all = cluster ? Array.from(cluster.children) : [];
-    const items = all.slice(0, all.indexOf(before));
-    if (!items.length) { done(); return; }
-
-    const first = items[0], last = items[items.length - 1];
-    this._searchFieldW = Math.round(last.offsetLeft + last.offsetWidth - first.offsetLeft);
-
-    if (!this.motionOk()) { done(); return; }
-    const STEP = 22, DUR = 140;
-    items.forEach((el, i) => {
-      el.style.setProperty('--gn-i', String(i));   // 由左而右依序退場
-      el.addClass('gn-btn-leaving');
-    });
-    window.setTimeout(done, (items.length - 1) * STEP + DUR);
-  }
-
-  // 收起工具列搜尋：輸入框先淡出，收完才換回按鈕（與進場對稱）
-  exitBarSearch() {
-    const wrap = this.contentEl.querySelector('.gn-bar-search');
-    const back = () => {
-      this._searchOn = false;
-      this._searchQ = '';
-      this._searchTreeOpen = false;   // 左欄回到「搜尋時預設收起」的初始狀態
-      this._barBtnsIn = true;         // 讓重畫後的按鈕依序進場（renderInner 消費一次）
-      this.render();
-    };
-    if (!wrap || !this.motionOk()) { back(); return; }
-    wrap.addClass('gn-bar-search-leaving');
-    window.setTimeout(back, 140);
-  }
-
-  /* 桌機：長在**膠囊內**的搜尋輸入框（2026-08-10）。
-     取代原本「按鈕開 Modal」的流程 —— 前五顆按鈕的位置換成輸入框，
-     搜尋鈕與「⋯ 更多」留在右側，膠囊總寬不變。
-     ⚠️ 輸入框在 .gn-bar 上（不在 .gn-main 內）：rerenderMain() 會 empty 掉 gn-main，
-        放進去的話每打一個字重畫結果就會失焦。 */
-  buildBarSearch(cluster) {
-    const wrap = cluster.createDiv('gn-bar-search');
-    if (this._searchFieldW) wrap.style.width = this._searchFieldW + 'px';
-    setIcon(wrap.createDiv('gn-bar-search-ic'), 'search');
-
-    const input = wrap.createEl('input', { type: 'search', cls: 'gn-bar-search-input' });
+  /* 桌機：常駐搜尋框（2026-11-18）。
+     放在 .gn-bar（不在 .gn-main）→ rerenderMain 清不到輸入框，打字不失焦。
+     搜尋時不再把整條工具列變形；樹也保留，可以邊搜邊換資料夾。 */
+  buildTopSearch(parent) {
+    const wrap = parent.createDiv('gn-top-search');
+    setIcon(wrap.createDiv('gn-top-search-ic'), 'search');
+    const input = wrap.createEl('input', { type: 'search', cls: 'gn-top-search-input' });
     input.placeholder = t('Search full text…');
     input.value = this._searchQ || '';
+    const clear = wrap.createDiv('gn-top-search-clear');
+    setIcon(clear, 'x');
+    clear.setAttr('aria-label', t('Clear search'));
+    const syncClear = () => clear.toggleClass('gn-top-search-clear-on', !!this._searchQ);
+    syncClear();
 
     let timer = null;
     const run = async () => {
       const q = input.value.trim();
+      const changed = q !== this._searchQ || !!q !== this._searchOn;
       this._searchQ = q;
+      this._searchOn = !!q;
+      if (this._syncNewBtn) this._syncNewBtn();
+      if (!changed) return;
       if (q && !this.plugin.search.ready) {
         this.rerenderMain();                    // 先顯示「建立索引中…」
         await this.plugin.search.ensureReady();
         if (input.value.trim() !== q) return;   // 建索引期間又打了字 → 交給後面那次
       }
       this.rerenderMain();
+      syncClear();
+    };
+    const reset = () => {
+      input.value = '';
+      clearTimeout(timer);
+      const changed = !!this._searchQ || this._searchOn;
+      this._searchQ = '';
+      this._searchOn = false;
+      if (this._syncNewBtn) this._syncNewBtn();
+      if (changed) this.rerenderMain();
+      syncClear();
+      input.focus();
     };
     input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 150); });
-    input.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !isImeKey(e)) this.exitBarSearch(); });
-    setTimeout(() => input.focus(), 0);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !isImeKey(e)) { e.stopPropagation(); reset(); }
+      else if (e.key === 'Enter') { e.preventDefault(); clearTimeout(timer); run(); }
+    });
+    clear.onclick = (e) => { e.stopPropagation(); reset(); };
   }
 
   /* 搜尋輸入列。2026-08-10 抽成方法：桌機要掛在右欄（.gn-maincol）、手機掛在 root，
@@ -3918,7 +3957,7 @@ class GalleryView extends ItemView {
     const sclose = srow.createDiv('gn-search-clear');
     setIcon(sclose, 'x');
     sclose.setAttr('title', t('Close search'));
-    const close = () => { this._searchOn = false; this._searchQ = ''; this._searchTreeOpen = false; this.render(); };
+    const close = () => { this._searchOn = false; this._searchQ = ''; this.render(); };
     sclose.onclick = close;
 
     let timer = null;
@@ -3993,55 +4032,26 @@ class GalleryView extends ItemView {
 
     const state = this.plugin.state;
 
-    /* --- 頂部工具列：左＝資料夾相關（對齊左欄）、右＝卡片相關（靠右） --- */
-    /* ===== 版面骨架（2026-08-10 桌機重組）=====
-       桌機：**取消橫跨兩欄的頂部工具列**，按鈕依所屬欄位收進各自的欄頭
-         .gn-bar.gn-bar-merged ＝ 麵包屑 + 一塊 .nav-buttons-container（全部按鈕）
-         底下才是 .gn-split（左樹 / 分隔桿 / 卡片牆）
-       手機：完全維持原本的底部 .gn-bar 與 [bar][searchRow][split] 的 DOM 順序
-             （使用者確認手機現況已好，2026-08-10 一行都不要動）。
-       ⚠️ 按鈕一律用 mkBarBtn() 建立，不要再直接 createDiv('gn-btn')。 */
+    /* --- 頂部工具列（2026-11-18 重整）---
+       桌機：常駐一條，左組＝導覽、右組＝內容。
+         左：資料夾/標籤切換（之後加過濾與收合）
+         右：搜尋框 · 排序 · 顯示選項 · 新建
+       不再用 Obsidian 的 hover 膠囊：要滑過去才展開，常用動作等於被藏起來。
+       手機：維持原本的底部 .gn-bar，一行都不動。 */
     const isMobileUI = document.body.classList.contains('is-mobile');
-    // 搜尋時預設收起左欄（搜尋結果是全 vault，資料夾樹沒意義）；
-    // 但搜尋中仍可用收合鈕手動展開（this._searchTreeOpen 當覆寫，不寫進 data.json）
-    const treeHidden = this._searchOn ? !this._searchTreeOpen : !!state.treeCollapsed;
+    const treeHidden = (isMobileUI && this._searchOn) ? !this._searchTreeOpen : !!state.treeCollapsed;
 
-    /* 桌機：一條橫跨兩欄的合併欄，**只放按鈕**，全部集中在同一個群組（2026-08-10）。
-       以前是 barL／barR 兩段、左段寬度還要用 JS 對齊左欄，麵包屑也塞在右段
-       （那兩段已於 2026-08-11 一併移除，見下方說明）。
-       麵包屑已移回右欄的牆內表頭（.gn-main-head，與手機同一條路徑）——
-       this._barTitle 保持 null，renderNoteWall() 的 useBarTitle 就會自動走牆內那條。
-       手機：維持原本的底部兩段式工具列，一行都不動。 */
     const bar = root.createDiv('gn-bar');
     this._barTitle = null;
-    if (!isMobileUI) bar.addClass('gn-bar-merged');
-    /* （2026-08-11）手機的 barL / barR 兩個 .gn-bar-group 已移除。
-       它們原本代表「左段＝資料夾工具、右段＝卡片工具」，但 CSS 早就寫成
-       `.is-mobile .gn-bar-group { display: contents }` —— 兩段在手機**不產生任何
-       視覺分隔**，所有按鈕都是 .gn-bar 的直接子元素、由 space-evenly 均分。
-       也就是說它們只剩「決定 DOM 順序」這個作用，而順序現在已由下方的 order
-       陣列統一決定。桌機從 08-10 起就走 cluster、根本沒用到這兩個 group。 */
-    /* 搜尋列必須在 .gn-main 外面（rerenderMain 會 empty 掉它 → 輸入框失焦），
-       且 DOM 順序固定是 [bar][searchRow][split]。
-       ⚠️ **手機限定**：桌機的輸入框已經改成長在工具列裡（見下方 buildBarSearch）。 */
+    if (!isMobileUI) bar.addClass('gn-topbar');
+    /* 手機搜尋列必須在 .gn-main 外面，且 DOM 順序固定 [bar][searchRow][split]。 */
     if (isMobileUI && this._searchOn) this.buildSearchRow(root);
 
-    /* 按鈕群組容器：桌機包成原生的 .nav-header > .nav-buttons-container，直接吃主題給的
-       膠囊底、hover 展開（Velocity 用 interpolate-size 對 fit-content 做尺寸補間）、按壓縮放。
-       ⚠️ 必須是 .nav-header 的**直接子元素** —— Velocity 的展開規則寫成
-          `.nav-header:hover > .nav-buttons-container`，少了父層就永遠停在 height:0
-          且子元素 filter:opacity(0) ＝ 整排按鈕隱形，而且不會報錯。 */
-    /* 桌機搜尋開啟時，膠囊**前段**換成輸入框（搜尋鈕與「⋯ 更多」留在右側），
-       膠囊本身照建，寬度不變。手機維持原況：按鈕開 GnSearchModal。 */
-    const barSearch = !isMobileUI && this._searchOn;
-    const cluster = isMobileUI ? null : bar.createDiv('nav-header').createDiv('nav-buttons-container');
-    /* ⚠️ 按鈕**先建進暫存容器**，最後才依平台的順序 append（見本段末尾的 order 陣列）。
-       桌機與手機的排列不同：桌機是一整塊、順序由使用者指定（2026-08-10）；
-       手機是左右兩段、順序必須維持原況（使用者確認手機不動）。
-       若照「建立順序＝DOM 順序」寫，改桌機排序就會連帶動到手機。 */
+    /* 按鈕先建進暫存容器，最後才依平台 append（手機順序不變）。 */
     const tray = createDiv();
-
-    const btn = {};   // key → 元素，最後依序 append
+    const btn = {};
+    const topLeft = isMobileUI ? null : bar.createDiv('gn-top-left');
+    const topRight = isMobileUI ? null : bar.createDiv('gn-top-right');
 
     /* --- 兩欄：左巢狀資料夾樹 + 右筆記牆 --- */
     const split = root.createDiv('gn-split');
@@ -4085,20 +4095,16 @@ class GalleryView extends ItemView {
        桌機收合後分隔桿會留成左邊界的感應區（滑過去就有紫線與箭頭），
        手機那顆本來就被 .is-mobile .gn-collapse-btn { display:none } 藏著 —— 兩邊都用不到了。 */
 
-    /* ===== 搜尋（全文，中文 ICU 斷詞 + bigram；結果直接呈現為卡牆）=====
-       桌機（2026-08-10）：點下去**整條工具列變成搜尋欄** —— 按鈕先依序淡出，
-       動畫收完才重畫成輸入框（見 morphBarOut / buildBarSearch）。
-       手機：維持原況，開 GnSearchModal 懸浮搜尋。 */
-    const searchBtn = btn.search = this.mkBarBtn(tray, 'search',
-      barSearch ? t('Close search') : t('Search notes (full-text popup)'),
-      { on: barSearch });
-    searchBtn.onclick = () => {
-      if (barSearch) { this.exitBarSearch(); return; }   // 搜尋中 → 這顆變成關閉
-      this.plugin.search.ensureReady();                  // 背景先把索引建起來
-      if (isMobileUI) { new GnSearchModal(this.app, this.plugin).open(); return; }
-      // 前五顆依序淡出、量好寬度，收完才重畫成輸入框
-      this.morphBarOut(searchBtn, () => { this._searchOn = true; this._searchQ = ''; this.render(); });
-    };
+    /* ===== 搜尋 =====
+       桌機：搜尋框常駐在工具列右組（見 buildTopSearch），打字即時篩選，不再把整條工具列變形。
+       手機：維持原況，這顆開 GnSearchModal 懸浮搜尋。 */
+    if (isMobileUI) {
+      const searchBtn = btn.search = this.mkBarBtn(tray, 'search', t('Search notes (full-text popup)'));
+      searchBtn.onclick = () => {
+        this.plugin.search.ensureReady();
+        new GnSearchModal(this.app, this.plugin).open();
+      };
+    }
 
     // root 的雙欄底色分界推到「樹寬 + 分隔桿 9px」＝右欄起點，灰色涵蓋分隔桿區，不留白縫。
     // （2026-08-10：原本這支還要同步工具列左段的寬度，桌機工具列取消後只剩這件事。）
@@ -4116,9 +4122,21 @@ class GalleryView extends ItemView {
       { on: state.leftMode === 'tag' });
     modeBtn.onclick = () => {
       state.leftMode = state.leftMode === 'tag' ? 'folder' : 'tag';
+      this.clearSearchState();
       this.plugin.saveState();
       this.render();
     };
+
+    /* 收起所有資料夾（2026-11-18）。桌機限定；手機沒有這個需求，維持原況。 */
+    if (!isMobileUI) {
+      const collapseBtn = btn.collapse = this.mkBarBtn(tray, 'minimize-2', t('Collapse all folders'));
+      collapseBtn.onclick = () => {
+        state.expandedFolders = [];
+        state.expandedTags = [];
+        this.plugin.saveState();
+        this.refreshTree();
+      };
+    }
 
     // 同步定位鈕已移入「⋯ 更多」面板（2026-07-19）
 
@@ -4146,15 +4164,23 @@ class GalleryView extends ItemView {
           點下去會建到上次的資料夾 —— 已知的既有行為，要修的話應該是「保留版位但
           disabled」，而不是隱藏。 */
     const inFolderView = !this._searchOn && state.leftMode !== 'tag';
-    if (isMobileUI ? !this._searchOn : state.leftMode !== 'tag') {
+    /* 桌機：新建鈕常駐，搜尋中／標籤模式變灰不可用（版位不跳）。
+       手機：維持原況（標籤模式仍顯示）。 */
+    if (isMobileUI ? !this._searchOn : true) {
       const newBtn = btn.new = this.mkBarBtn(tray, 'file-plus',
         t('Create here (folder / note / canvas / base)'),
         { disabled: !inFolderView });
-      /* 工具列這顆走共用的清單浮層（與排序、標籤同一種外觀與行為）。
-         牆面空白處右鍵仍走原生 Menu（newFileMenu）—— 那裡沒有錨點按鈕可以對齊，
-         而且右鍵跳原生選單本來就是使用者的預期。 */
-      if (inFolderView) newBtn.onclick = (e) => {
+      this._newBtn = newBtn;
+      this._syncNewBtn = () => {
+        if (isMobileUI) return;   // 手機維持原況（含標籤模式仍可點）
+        const ok = !this._searchOn && state.leftMode !== 'tag';
+        newBtn.toggleClass('is-disabled', !ok);
+        newBtn.setAttr('aria-disabled', ok ? 'false' : 'true');
+      };
+      this._syncNewBtn();
+      newBtn.onclick = (e) => {
         e.stopPropagation();
+        if (!isMobileUI && (this._searchOn || state.leftMode === 'tag')) return;
         const f = this.folderAt(this.path);
         if (!f) return;
         this.openListPopover(newBtn, [
@@ -4201,44 +4227,16 @@ class GalleryView extends ItemView {
     }
 
     // 右：⋯ 更多（排序 / 卡片大小滑桿 / 重新整理 → 單層浮動面板）
-    const moreBtn = btn.more = this.mkBarBtn(tray, 'more-horizontal', t('More (card layout / size / corners)'));
+    const moreBtn = btn.more = this.mkBarBtn(tray, isMobileUI ? 'more-horizontal' : 'sliders-horizontal', t('View options (layout / size / corners)'));
     moreBtn.onclick = (e) => { e.stopPropagation(); this.openMorePopover(moreBtn); };
 
-    /* 依平台把按鈕排進實際的容器（見上面 tray 的說明）。
-       ⚠️ **兩個平台共用同一份順序**（2026-08-11）：新建 · 標籤模式 · 排序 · 搜尋 · 更多。
-          以前手機是另一份「左段 mode·eye／右段 search·new·more」，等於同一條工具列
-          維護兩份排列，改一邊很容易忘了另一邊。現在只有這一個陣列。
-          平台差異只剩**容器**（手機直接掛在 .gn-bar，桌機掛在原生膠囊 cluster）
-          與**外觀**（mkBarBtn 只在桌機掛 .clickable-icon —— 那個 class 在 app.css
-          有手機專屬的觸控尺寸規則，掛上去手機會跟著變，CSS 蓋不掉）。 */
-    const BAR_ORDER = ['new', 'mode', 'sort', 'search', 'more'];
+    /* 依平台放入容器：手機沿用原本的底部排列；桌機分成導覽／內容兩組。 */
     if (isMobileUI) {
-      for (const k of BAR_ORDER) if (btn[k]) bar.appendChild(btn[k]);
+      for (const k of ['new', 'mode', 'sort', 'search', 'more']) if (btn[k]) bar.appendChild(btn[k]);
     } else {
-      if (barSearch) {
-        /* 搜尋中：前段換成輸入框，只留搜尋與更多。
-           ⚠️ 膠囊要強制展開 —— 平常是 .nav-header:hover 才展開，
-              滑鼠移開輸入框就會縮回小球，打字打到一半整條不見。 */
-        cluster.parentElement.addClass('gn-cluster-open');
-        this.buildBarSearch(cluster);
-        for (const k of ['search', 'more']) if (btn[k]) cluster.appendChild(btn[k]);
-      } else {
-      for (const k of BAR_ORDER) {
-        if (btn[k]) cluster.appendChild(btn[k]);
-      }
-      }
-      /* 從搜尋欄切回按鈕時，讓按鈕依序進場（與 morphBarOut 的退場對稱）。
-         旗標由 buildBarSearch 的 close() 設定，**用一次就清掉** —— 否則之後每次
-         整頁重畫（換資料夾、拖卡片…）按鈕都會再抖一次。 */
-      if (this._barBtnsIn) {
-        this._barBtnsIn = false;
-        if (this.motionOk()) {
-          Array.from(cluster.children).forEach((el, i) => {
-            el.style.setProperty('--gn-i', String(i));
-            el.addClass('gn-btn-entering');
-          });
-        }
-      }
+      for (const k of ['mode', 'collapse']) if (btn[k]) topLeft.appendChild(btn[k]);
+      this.buildTopSearch(topRight);
+      for (const k of ['sort', 'more', 'new']) if (btn[k]) topRight.appendChild(btn[k]);
     }
 
     // 鍵盤可及性：.gn-btn 是 div，預設不可 focus → 補上 button 語意與 Enter/Space 觸發。
@@ -4509,6 +4507,7 @@ class GalleryView extends ItemView {
             this.inlineRenameFolder(it.folder, nameEl);
             return;
           }
+          this.clearSearchState();
           this.path = it.folder.path;
           state.lastPath = it.folder.path;
           this._focusTreeSel = it.folder.path;   // 選後聚焦此列，讓 Enter 能改名
@@ -5262,13 +5261,18 @@ class GalleryView extends ItemView {
         mod: dragOut === 'alt' ? 'Alt / Option' : 'Ctrl / Cmd',
       }));
     }
-    const mk = (label, icon, fn, warn) => {
+    // 圖示 + 文字：只有圖示時得逐顆 hover 才知道是什麼（2026-11-18）。
+    // 手機卡片沒有多選（點一下即開啟），文字標籤只給桌機。
+    const mobile = document.body.classList.contains('is-mobile');
+    const mk = (label, icon, fn, warn, short) => {
       const b = bar.createDiv('gn-selbar-btn' + (warn ? ' gn-selbar-warn' : ''));
       setIcon(b, icon); b.setAttr('title', label);
+      b.setAttr('aria-label', label);
+      if (!mobile) b.createSpan('gn-selbar-label').setText(short || label);
       b.onclick = (e) => { e.stopPropagation(); fn(e); };
     };
     mk(t('Select all'), 'check-check', () => this.selectAll());
-    mk(t('Copy wiki links (one per line)'), 'link', () => this.copySelectedLinks());
+    mk(t('Copy wiki links (one per line)'), 'link', () => this.copySelectedLinks(), false, t('Copy links'));
     mk(t('Move to…'), 'folder-input', () => this.moveSelected());
     mk(t('Tags…'), 'tags', () => {
       const files = [...this.selected]
@@ -6131,6 +6135,32 @@ class GalleryView extends ItemView {
 
   // keepOrder: 保持傳入順序，不套日期排序、不把釘選浮到最前
   //            （搜尋結果必須維持 BM25 相關性排名，一排序就毀了）
+  /* 桌機牆頭路徑（2026-11-18）：vault / … / 上一層 / 目前。
+     只顯示最後兩層，深目錄不會把標題擠爆；點任一層直接跳過去。 */
+  renderWallCrumbs(head, folder) {
+    const vault = this.app.vault.getName();
+    const path = folder && folder.path && folder.path !== '/' ? folder.path : '';
+    const parts = path ? path.split('/') : [];
+    const wrap = head.createDiv('gn-crumbs');
+    const add = (label, target, current) => {
+      const el = wrap.createSpan({ cls: 'gn-crumb' + (current ? ' gn-crumb-cur' : ''), text: label });
+      el.setAttr('title', target || vault);
+      if (current) el.setAttr('aria-current', 'page');
+      else el.onclick = (e) => { e.stopPropagation(); this.navigate(target); };
+    };
+    add(vault, '', !parts.length);
+    if (parts.length > 2) {
+      wrap.createSpan({ cls: 'gn-crumb-sep', text: '/' });
+      const more = wrap.createSpan({ cls: 'gn-crumb-more', text: '…' });
+      more.setAttr('title', path);
+    }
+    const start = Math.max(0, parts.length - 2);
+    for (let i = start; i < parts.length; i++) {
+      wrap.createSpan({ cls: 'gn-crumb-sep', text: '/' });
+      add(parts[i], parts.slice(0, i + 1).join('/'), i === parts.length - 1);
+    }
+  }
+
   renderNoteWall(container, folder, filesOverride, headOverride, keepOrder, emptyText) {
     const app = this.app;
 
@@ -6143,13 +6173,21 @@ class GalleryView extends ItemView {
     const head = container.createDiv('gn-main-head');
     const isMobileUI = document.body.classList.contains('is-mobile');
     if (!headOverride && folder) {
-      const name = folder.path && folder.path !== '/'
-        ? folder.path.split('/').pop()
-        : this.app.vault.getName();
-      head.createSpan({ cls: 'gn-bar-title-text', text: name });
+      if (isMobileUI) {
+        // 手機維持原本的「只顯示當下資料夾名、置中」
+        const name = folder.path && folder.path !== '/'
+          ? folder.path.split('/').pop()
+          : this.app.vault.getName();
+        head.createSpan({ cls: 'gn-bar-title-text', text: name });
+      } else {
+        // 桌機：可點的路徑（深層只留最後兩層），比只有名字更好回到上層
+        this.renderWallCrumbs(head, folder);
+      }
     } else {
       head.createSpan({ cls: 'gn-bar-title-text', text: headText });
     }
+    /* 桌機：這面牆的項目數。搜尋牆的標題本身已含結果數，不再重複。 */
+    const countEl = (!isMobileUI && !this._searchQ) ? head.createSpan('gn-head-count') : null;
 
     /* 右上角：標籤 / 版面 / 攤平（2026-08-10 從工具列移來，2026-08-11 手機也沿用）。
        三者只作用於「目前這面牆」，放在牆的表頭比放在全域工具列更貼近作用範圍。
@@ -6159,9 +6197,10 @@ class GalleryView extends ItemView {
           否則標題只會在「扣掉按鈕之後的剩餘空間」裡置中 → 看起來偏左、像沒對齊。
           用 state class 而不是 :has()（上架規範禁用，見 07-31）。 */
     if (!headOverride && folder && this.plugin.state.leftMode !== 'tag') {
-      head.addClass('gn-head-has-acts');
       const acts = head.createDiv('gn-head-acts');
       const nTags = this.folderTags().length;
+      // 桌機只有標籤鈕；手機仍有版面/攤平兩顆（維持原況）
+      if (isMobileUI || nTags) head.addClass('gn-head-has-acts');
       // 亮起的條件是「面板展開中」**或**「正在篩選」—— 面板收起來時仍看得出有套篩選
       const filtering = !!(this._tagFilter && this._tagFilter.size);
       const tagsBtn = this.mkBarBtn(acts, 'tags',
@@ -6176,58 +6215,56 @@ class GalleryView extends ItemView {
         tagsBtn.toggleClass('is-active', !!this._tagOpen || !!(this._tagFilter && this._tagFilter.size));
       };
 
-      /* 這個資料夾的圖片卡版面（2026-08-10）。全域預設在「⋯ 更多」，這裡是**單一資料夾的覆寫**。
-         · 圖示 = 目前**實際生效**的版面（含從祖先繼承來的）
-         · 只有「這個資料夾自己有指定」時才亮起 —— 繼承來的不亮，
-           否則設了 inbox/ig 之後底下每個子資料夾都亮，看不出是誰設的
-         · 選單第一項是「跟隨全域」（清掉覆寫）—— 沒有這個三態的話，
-           點過一次就永久脫離全域預設，之後改全域對它無效（設定繼承的經典陷阱） */
-      const own = this.ownLayout();
-      const eff = this._layout || 'overlay';
-      const LAYOUTS_H = [['overlay', 'image', 'Photo'], ['stacked', 'frame', 'Museum'], ['editorial', 'type', 'Editor']];
-      const effIcon = (LAYOUTS_H.find((x) => x[0] === eff) || LAYOUTS_H[0])[1];
-      const effName = (LAYOUTS_H.find((x) => x[0] === eff) || LAYOUTS_H[0])[2];
-      const layoutBtn = this.mkBarBtn(acts, effIcon,
-        t('Image card layout') + ' · ' + t(effName),
-        { on: !!own, cls: 'gn-head-btn', key: 'layout' });
-      layoutBtn.onclick = (e) => {
-        e.stopPropagation();
-        const key = this.path || '';
-        const rows = [{
-          icon: 'rotate-ccw',
-          label: t('Follow global'),
-          checked: !own,
-          onClick: () => {
-            const map = Object.assign({}, this.plugin.state.folderLayouts || {});
-            delete map[key];
-            this.plugin.state.folderLayouts = map;
-            this.plugin.saveState();
-            this.render();
-          },
-        }];
-        for (const [k, icon, label] of LAYOUTS_H) {
-          rows.push({
-            icon, label: t(label), checked: own === k,
+      /* 手機維持原況：牆頭保留版面與攤平兩顆。
+         桌機已收攏到工具列的「視圖」選單（2026-11-18）。 */
+      if (isMobileUI) {
+        const own = this.ownLayout();
+        const eff = this._layout || 'overlay';
+        const LAYOUTS_H = [['overlay', 'image', 'Photo'], ['stacked', 'frame', 'Museum'], ['editorial', 'type', 'Editor']];
+        const effIcon = (LAYOUTS_H.find((x) => x[0] === eff) || LAYOUTS_H[0])[1];
+        const effName = (LAYOUTS_H.find((x) => x[0] === eff) || LAYOUTS_H[0])[2];
+        const layoutBtn = this.mkBarBtn(acts, effIcon,
+          t('Image card layout') + ' · ' + t(effName),
+          { on: !!own, cls: 'gn-head-btn', key: 'layout' });
+        layoutBtn.onclick = (e) => {
+          e.stopPropagation();
+          const key = this.path || '';
+          const rows = [{
+            icon: 'rotate-ccw',
+            label: t('Follow global'),
+            checked: !own,
             onClick: () => {
               const map = Object.assign({}, this.plugin.state.folderLayouts || {});
-              map[key] = k;
+              delete map[key];
               this.plugin.state.folderLayouts = map;
               this.plugin.saveState();
-              this.render();   // 版面會改卡片結構與欄寬下限 → 整頁重畫
+              this.render();
             },
-          });
-        }
-        this.openListPopover(layoutBtn, rows);
-      };
+          }];
+          for (const [k, icon, label] of LAYOUTS_H) {
+            rows.push({
+              icon, label: t(label), checked: own === k,
+              onClick: () => {
+                const map = Object.assign({}, this.plugin.state.folderLayouts || {});
+                map[key] = k;
+                this.plugin.state.folderLayouts = map;
+                this.plugin.saveState();
+                this.render();
+              },
+            });
+          }
+          this.openListPopover(layoutBtn, rows);
+        };
 
-      const flatBtn = this.mkBarBtn(acts, 'layers',
-        t('Flatten: include all subfolders'),
-        { on: !!this.plugin.state.flattenFolders, cls: 'gn-head-btn', key: 'flatten' });
-      flatBtn.onclick = () => {
-        this.plugin.state.flattenFolders = !this.plugin.state.flattenFolders;
-        this.plugin.saveState();
-        this.render();
-      };
+        const flatBtn = this.mkBarBtn(acts, 'layers',
+          t('Flatten: include all subfolders'),
+          { on: !!this.plugin.state.flattenFolders, cls: 'gn-head-btn', key: 'flatten' });
+        flatBtn.onclick = () => {
+          this.plugin.state.flattenFolders = !this.plugin.state.flattenFolders;
+          this.plugin.saveState();
+          this.render();
+        };
+      }
 
       /* 內嵌標籤面板：表頭下方、卡片上方。展開時把卡片往下推（見 .gn-tagbar 的說明）。
          ⚠️ 一律建立（只要有標籤），開合只切 class —— 這樣按鈕的 onclick 不必重畫，
@@ -6279,6 +6316,11 @@ class GalleryView extends ItemView {
     ];
     // 此資料夾是否隱藏內文預覽
     const perFolderHide = folder ? (this.plugin.state.noPreviewFolders || []).includes(folder.path) : false;
+
+    if (countEl) {
+      countEl.setText(String(notes.length));
+      countEl.setAttr('title', t('{{n}} items', { n: notes.length }));
+    }
 
     this.beginWall(container);
     const { grid, masonry } = this.makeGrid(container);
@@ -6442,6 +6484,19 @@ class GallerySettingTab extends PluginSettingTab {
       .setDesc(t('Tints each card with the dominant color of its cover image. Cards you colored manually are left alone.'))
       .addToggle((tg) => tg.setValue(!!st.autoCardColor)
         .onChange((v) => { st.autoCardColor = v; save(); this.plugin.refreshViews(); }));
+
+    /* 全域圖片版面（2026-11-18 從「⋯ 更多」搬回設定頁）。
+       工具列的「視圖」只負責單一資料夾的覆寫，兩者不再混在同一個選單。 */
+    new Setting(containerEl)
+      .setName(t('Default image card layout'))
+      .setDesc(t('Used for folders without their own override. To override one folder, open the view menu on that folder.'))
+      .addDropdown((d) => {
+        d.addOption('overlay', t('Photo'));
+        d.addOption('stacked', t('Museum'));
+        d.addOption('editorial', t('Editor'));
+        d.setValue(GN_LAYOUTS.includes(st.imageCardLayout) ? st.imageCardLayout : 'overlay');
+        d.onChange((v) => { st.imageCardLayout = v; save(); this.plugin.refreshViews(); });
+      });
 
     new Setting(containerEl)
       .setName(t('Excalidraw thumbnails'))

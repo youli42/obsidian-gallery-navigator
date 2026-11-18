@@ -57,6 +57,58 @@
   display: flex; align-items: stretch;
   width: 100%; margin: 0; padding: 0;
 }
+/* 桌機常駐工具列（2026-11-18）：左組導覽、右組內容。
+   不用 Obsidian 的 hover 膠囊 —— 那要滑過才展開，常用動作等於被藏起來。 */
+.gn-topbar {
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 0 12px;
+  background: var(--background-primary);
+  border-bottom: 1px solid color-mix(in srgb, var(--background-modifier-border) 55%, transparent);
+}
+.gn-top-left, .gn-top-right { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.gn-top-left { flex: none; }
+.gn-top-right { flex: 1; justify-content: flex-end; gap: 6px; }
+.gn-btn.is-disabled { opacity: .4; pointer-events: none; }
+/* 常駐搜尋框：放在工具列、不在 .gn-main → 打字重畫結果不失焦。 */
+.gn-top-search {
+  flex: 1 1 240px;
+  min-width: 120px; max-width: 420px;
+  height: 32px;
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 6px 0 10px;
+  border-radius: 999px;
+  background: var(--background-modifier-form-field);
+  border: 1px solid var(--background-modifier-border);
+}
+.gn-top-search:focus-within { border-color: var(--interactive-accent); }
+.gn-top-search-ic { flex: none; display: flex; color: var(--text-muted); }
+.gn-top-search-ic svg { width: 15px; height: 15px; }
+/* 特異度要蓋過 app.css 的 input[type=search]（(0,1,1)）。 */
+.gn-top-search .gn-top-search-input,
+.gn-top-search .gn-top-search-input:hover,
+.gn-top-search .gn-top-search-input:focus,
+.gn-top-search .gn-top-search-input:focus-visible,
+.gn-top-search .gn-top-search-input:active {
+  flex: 1; min-width: 0;
+  -webkit-appearance: none; appearance: none;
+  background: transparent;
+  border: none; outline: none; box-shadow: none;
+  font-size: 13px; color: var(--text-normal);
+  padding: 0;
+}
+.gn-top-search .gn-top-search-input::-webkit-search-cancel-button,
+.gn-top-search .gn-top-search-input::-webkit-search-decoration { display: none; }
+.gn-top-search-clear {
+  flex: none; width: 22px; height: 22px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; cursor: pointer; color: var(--text-muted);
+  opacity: 0; pointer-events: none;
+}
+.gn-top-search-clear:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
+.gn-top-search-clear-on { opacity: 1; pointer-events: auto; }
+.gn-top-search-clear svg { width: 14px; height: 14px; }
 /* （2026-08-11 移除）.gn-bar-group 的 5 條規則。手機的 barL/barR 兩段已拿掉，
    按鈕直接掛在 .gn-bar 上（順序由 JS 的 BAR_ORDER 統一決定）；桌機從 08-10 起
    走原生膠囊 .nav-buttons-container，也沒用到這個 class。 */
@@ -510,6 +562,29 @@ body:not(.is-mobile) .gn-bar-merged .nav-header.gn-cluster-open > .nav-buttons-c
 }
 /* 右上角控制項：緊貼右緣，與標題同一行 */
 .gn-head-acts { flex: none; display: flex; align-items: center; gap: 2px; }
+/* 桌機牆頭路徑（2026-11-18）：可點父層 + 目前資料夾。深目錄只顯示最後兩層。 */
+.gn-crumbs {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 2px;
+  overflow: hidden; white-space: nowrap;
+}
+.gn-crumb {
+  flex: 0 1 auto; min-width: 0; max-width: 220px; cursor: pointer;
+  padding: 1px 4px; border-radius: 5px;
+  color: var(--text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gn-crumb:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
+.gn-crumb-cur { color: var(--text-normal); font-weight: 600; cursor: default; }
+.gn-crumb-cur:hover { background: transparent; }
+.gn-crumb-sep, .gn-crumb-more { flex: none; color: var(--text-faint); }
+.gn-head-count {
+  flex: none;
+  padding: 1px 7px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; color: var(--text-muted);
+  background: color-mix(in srgb, var(--text-normal) 7%, transparent);
+  font-variant-numeric: tabular-nums;
+}
 
 
 /* 巢狀資料夾樹：每列 caret + 縮圖 + 名稱 + 數量，縮排依 --gn-depth */
@@ -799,9 +874,12 @@ body:not(.is-mobile) .gn-card:hover {
 }
 .gn-selbar-count { font-size: 12px; font-weight: 600; color: var(--text-normal); padding: 0 8px 0 4px; }
 .gn-selbar-btn {
-  width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;
+  height: 34px; min-width: 34px; padding: 0 9px;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
   border-radius: 999px; cursor: pointer; color: var(--text-muted);
+  font-size: 12px;
 }
+.gn-selbar-label { font-weight: 500; white-space: nowrap; }
 :where(body:not(.is-mobile)) .gn-selbar-btn:hover, .gn-selbar-btn:active { background: var(--background-modifier-hover); color: var(--text-normal); }
 .gn-selbar-btn svg { width: 18px; height: 18px; }
 :where(body:not(.is-mobile)) .gn-selbar-warn:hover, .gn-selbar-warn:active { background: var(--background-modifier-error, rgba(220,60,60,.15)); color: var(--text-error); }

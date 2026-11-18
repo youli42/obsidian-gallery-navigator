@@ -64,6 +64,7 @@ const ZH_TW = {
   // ── 工具列 ──
   'Close search': '關閉搜尋',
   'Search notes (full-text popup)': '搜尋筆記（懸浮全文搜尋）',
+  'Clear search': '清除搜尋',
   'Current: tags (click to switch to folders)': '目前：標籤（點擊切回資料夾）',
   'Current: folders (click to switch to tags)': '目前：資料夾（點擊切到標籤）',
   'Follow active note': '定位目前筆記',
@@ -71,6 +72,12 @@ const ZH_TW = {
   'Show hidden folders': '顯示被隱藏的資料夾',
   'Create here (folder / note / canvas / base)': '在此新建（資料夾 / 筆記 / Canvas / Base）',
   'More (card layout / size / corners)': '更多（卡片版型 / 大小 / 圓角）',
+  'View options (layout / size / corners)': '顯示選項（版型 / 大小 / 圓角）',
+  'This folder': '本資料夾',
+  'Default image card layout': '預設圖片卡版型',
+  'Used for folders without their own override. To override one folder, open the view menu on that folder.': '沒有個別設定時使用。要覆寫單一資料夾，在該資料夾的顯示選單裡改。',
+  'Copy links': '複製連結',
+  '{{n}} items': '{{n}} 項',
   'Search full text…': '搜尋全文…',
 
   // ── 設定頁 ──
@@ -155,6 +162,7 @@ const ZH_TW = {
   'Gallery render error: {{msg}}': '⚠️ Gallery render 錯誤：{{msg}}',
   'Expand folder pane': '展開資料夾面板', 'Collapse folder pane': '收合資料夾面板',
   'Collapse': '收合', 'Expand': '展開', 'Create here': '在此新建', 'Copy path': '複製路徑',
+  'Collapse all folders': '全部收合',
   'Color': '顏色', 'Auto (by name)': '自動（依名稱）', 'Show text preview': '顯示內文',
   'Unhide': '取消隱藏', 'Hide this folder': '隱藏這個資料夾', 'Reveal in Finder': '在 Finder 顯示',
   'Delete folder': '刪除資料夾',
@@ -352,6 +360,7 @@ const ZH_CN = {
   // ── 工具列 ──
   'Close search': '关闭搜索',
   'Search notes (full-text popup)': '搜索笔记（悬浮全文搜索）',
+  'Clear search': '清除搜索',
   'Current: tags (click to switch to folders)': '当前：标签（点击切回文件夹）',
   'Current: folders (click to switch to tags)': '当前：文件夹（点击切换到标签）',
   'Follow active note': '定位当前笔记',
@@ -359,6 +368,12 @@ const ZH_CN = {
   'Show hidden folders': '显示被隐藏的文件夹',
   'Create here (folder / note / canvas / base)': '在此新建（文件夹 / 笔记 / Canvas / Base）',
   'More (card layout / size / corners)': '更多（卡片布局 / 大小 / 圆角）',
+  'View options (layout / size / corners)': '显示选项（布局 / 大小 / 圆角）',
+  'This folder': '当前文件夹',
+  'Default image card layout': '默认图片卡布局',
+  'Used for folders without their own override. To override one folder, open the view menu on that folder.': '没有单独设置时使用。要覆盖单个文件夹，请在该文件夹的显示菜单中修改。',
+  'Copy links': '复制链接',
+  '{{n}} items': '{{n}} 项',
   'Search full text…': '全文搜索…',
 
   // ── 设置页 ──
@@ -442,6 +457,7 @@ const ZH_CN = {
   'Gallery render error: {{msg}}': '⚠️ 画廊渲染错误：{{msg}}',
   'Expand folder pane': '展开文件夹面板', 'Collapse folder pane': '收起文件夹面板',
   'Collapse': '收起', 'Expand': '展开', 'Create here': '在此新建', 'Copy path': '复制路径',
+  'Collapse all folders': '全部收起',
   'Color': '颜色', 'Auto (by name)': '自动（按名称）', 'Show text preview': '显示正文',
   'Unhide': '取消隐藏', 'Hide this folder': '隐藏此文件夹', 'Reveal in Finder': '在 Finder 中显示',
   'Delete folder': '删除文件夹',
