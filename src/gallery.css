@@ -71,9 +71,26 @@
 .gn-top-left { flex: none; }
 .gn-top-right { flex: 1; justify-content: flex-end; gap: 6px; }
 .gn-btn.is-disabled { opacity: .4; pointer-events: none; }
+/* 常駐的目前位置（麵包屑）與檢視模式；與搜尋框同一列，往下捲也看得到。 */
+.gn-top-context {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; align-items: center; gap: 6px;
+}
+.gn-top-crumb { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; }
+.gn-top-crumb .gn-crumbs { flex: 1; }
+.gn-top-mode {
+  flex: none; max-width: 180px;
+  padding: 1px 7px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; color: var(--text-muted);
+  background: color-mix(in srgb, var(--text-normal) 7%, transparent);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 /* 常駐搜尋框：放在工具列、不在 .gn-main → 打字重畫結果不失焦。 */
+/* 標籤篩選面板：在常駐工具列下方、卡片捲動區外，開著時永遠看得到。 */
+.gn-top-tagbar-host { flex: none; padding: 0 12px; }
+.gn-top-tagbar-host:empty { display: none; }
 .gn-top-search {
-  flex: 1 1 240px;
+  flex: 0 1 320px;
   min-width: 120px; max-width: 420px;
   height: 32px;
   display: flex; align-items: center; gap: 6px;

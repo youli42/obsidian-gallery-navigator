@@ -4286,6 +4286,9 @@ class GalleryView extends ItemView {
     /* 手機搜尋列必須在 .gn-main 外面，且 DOM 順序固定 [bar][searchRow][split]。 */
     if (isMobileUI && this._searchOn) this.buildSearchRow(root);
 
+    /* 桌機的標籤篩選面板放在工具列下方、卡片捲動區外 → 開著時永遠看得到。 */
+    this._tagbarHost = isMobileUI ? null : root.createDiv('gn-top-tagbar-host');
+
     /* 按鈕先建進暫存容器，最後才依平台 append（手機順序不變）。 */
     const tray = createDiv();
     const btn = {};
@@ -4502,6 +4505,25 @@ class GalleryView extends ItemView {
       for (const k of ['new', 'mode', 'sort', 'search', 'more']) if (btn[k]) bar.appendChild(btn[k]);
     } else {
       for (const k of ['mode', 'filter', 'collapse']) if (btn[k]) topLeft.appendChild(btn[k]);
+
+      /* 常駐：目前路徑 + 數量 + 標籤篩選。以前這些都在牆內表頭，往下捲就看不到。 */
+      const topCtx = topRight.createDiv('gn-top-context');
+      this._topCrumbEl = topCtx.createDiv('gn-top-crumb');
+      this._topCountEl = topCtx.createSpan('gn-head-count');
+      this._topCountEl.style.display = 'none';
+      const tagBtn = this._topTagBtn = this.mkBarBtn(topRight, 'tags', t('Tags in this folder'), { cls: 'gn-top-tag', key: 'tags' });
+      tagBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (this._searchQ || this.plugin.state.leftMode === 'tag') return;
+        if (!this.folderTags().length) return;
+        this._tagOpen = !this._tagOpen;
+        const bar = this._tagbarHost && this._tagbarHost.querySelector('.gn-tagbar');
+        if (bar) bar.toggleClass('gn-tagbar-open', !!this._tagOpen);
+        this.syncTopTagButton();
+      };
+      topRight.appendChild(topCtx);
+      topRight.appendChild(tagBtn);
+      this.syncTopTagButton();
       this.buildTopSearch(topRight);
       for (const k of ['sort', 'more', 'new']) if (btn[k]) topRight.appendChild(btn[k]);
     }
@@ -5003,6 +5025,12 @@ class GalleryView extends ItemView {
 
   // 搜尋結果 → 卡牆。keepOrder=true 保住 BM25 相關性排名（不套日期排序）
   renderSearchWall(main) {
+    if (!document.body.classList.contains('is-mobile')) {
+      if (this._tagbarHost) this._tagbarHost.empty();
+      this.updateTopContext(this.folderAt(this.path), t('Search results'));
+      this.syncTopTagButton();
+      if (this._topCountEl) this._topCountEl.style.display = 'none';
+    }
     const idx = this.plugin.search;
     if (!idx.ready) { main.createDiv('gn-empty').setText(t('Building index…')); return; }
     const hits = idx.search(this._searchQ, 0);          // 0 = 不設上限（卡牆本來就懶載入）
@@ -6326,8 +6354,43 @@ class GalleryView extends ItemView {
 
   // keepOrder: 保持傳入順序，不套日期排序、不把釘選浮到最前
   //            （搜尋結果必須維持 BM25 相關性排名，一排序就毀了）
-  /* 桌機牆頭路徑（2026-11-18）：vault / … / 上一層 / 目前。
+  /* 桌機常駐工具列路徑（2026-11-18）：vault / … / 上一層 / 目前。
      只顯示最後兩層，深目錄不會把標題擠爆；點任一層直接跳過去。 */
+  /* 桌機常駐工具列的「目前位置」：資料夾路徑 + 檢視模式（搜尋/標籤）。
+     只在桌機存在；手機仍用牆內表頭。 */
+  updateTopContext(folder, modeText) {
+    const wrap = this._topCrumbEl;
+    if (!wrap) return;
+    wrap.empty();
+    this.renderWallCrumbs(wrap, folder || this.folderAt(this.path));
+    if (modeText) wrap.createSpan('gn-top-mode').setText(modeText);
+  }
+  /* 桌機常駐工具列的標籤篩選鈕：跟著目前資料夾/搜尋狀態更新可用性與亮燈。 */
+  syncTopTagButton() {
+    const b = this._topTagBtn;
+    if (!b) return;
+    const n = (!this._searchQ && this.plugin.state.leftMode !== 'tag') ? this.folderTags().length : 0;
+    const ok = n > 0;
+    b.toggleClass('is-disabled', !ok);
+    b.setAttr('aria-disabled', ok ? 'false' : 'true');
+    b.toggleClass('is-active', ok && (!!this._tagOpen || !!(this._tagFilter && this._tagFilter.size)));
+    b.setAttr('aria-label', n ? t('Tags in this folder') + ' · ' + n : t('Tags in this folder'));
+  }
+  // 內嵌標籤面板：表頭下方、卡片上方；開合只切 class，不重畫卡片。
+  renderTagbar(container) {
+    const tags = this.folderTags();
+    if (!tags.length) return;
+    const bar = container.createDiv('gn-tagbar');
+    bar.toggleClass('gn-tagbar-open', !!this._tagOpen);
+    const inner = bar.createDiv('gn-tagbar-inner');
+    this.fillTagChips(inner, tags);
+    if (this._tagFilter && this._tagFilter.size) {
+      const clear = inner.createDiv('gn-tagbar-clear');
+      clear.setText(t('Clear'));
+      clear.onclick = () => { this._tagFilter = new Set(); this.rerenderMain(); };
+    }
+  }
+
   renderWallCrumbs(head, folder) {
     const vault = this.app.vault.getName();
     const path = folder && folder.path && folder.path !== '/' ? folder.path : '';
@@ -6359,56 +6422,36 @@ class GalleryView extends ItemView {
     const flatten = !filesOverride && folder && this.plugin.state.flattenFolders;
 
     const headText = headOverride || (folder && folder.path && folder.path !== '/' ? folder.path : this.app.vault.getName());
-    /* 牆內表頭（2026-08-10 改）：左邊**只顯示當下資料夾名**（原本是整串可點的麵包屑，
-       層級深時很長；上下層改用左欄的樹導覽），右邊放「這面牆」專屬的控制項。 */
-    const head = container.createDiv('gn-main-head');
     const isMobileUI = document.body.classList.contains('is-mobile');
-    if (!headOverride && folder) {
-      if (isMobileUI) {
-        // 手機維持原本的「只顯示當下資料夾名、置中」
+    const state = this.plugin.state;
+
+    if (isMobileUI) {
+      /* 手機維持原本的牆內表頭（名稱 + 標籤/版面/攤平），一行都不動。 */
+      const head = container.createDiv('gn-main-head');
+      if (!headOverride && folder) {
         const name = folder.path && folder.path !== '/'
           ? folder.path.split('/').pop()
           : this.app.vault.getName();
         head.createSpan({ cls: 'gn-bar-title-text', text: name });
       } else {
-        // 桌機：可點的路徑（深層只留最後兩層），比只有名字更好回到上層
-        this.renderWallCrumbs(head, folder);
+        head.createSpan({ cls: 'gn-bar-title-text', text: headText });
       }
-    } else {
-      head.createSpan({ cls: 'gn-bar-title-text', text: headText });
-    }
-    /* 桌機：這面牆的項目數。搜尋牆的標題本身已含結果數，不再重複。 */
-    const countEl = (!isMobileUI && !this._searchQ) ? head.createSpan('gn-head-count') : null;
+      if (!headOverride && folder && state.leftMode !== 'tag') {
+        const acts = head.createDiv('gn-head-acts');
+        const nTags = this.folderTags().length;
+        head.addClass('gn-head-has-acts');
+        const filtering = !!(this._tagFilter && this._tagFilter.size);
+        const tagsBtn = this.mkBarBtn(acts, 'tags',
+          nTags ? t('Tags in this folder') + ' · ' + nTags : t('Tags in this folder'),
+          { on: filtering || !!this._tagOpen, disabled: !nTags, cls: 'gn-head-btn', key: 'tags' });
+        if (nTags) tagsBtn.onclick = (e) => {
+          e.stopPropagation();
+          this._tagOpen = !this._tagOpen;
+          const bar = this._main && this._main.querySelector('.gn-tagbar');
+          if (bar) bar.toggleClass('gn-tagbar-open', !!this._tagOpen);
+          tagsBtn.toggleClass('is-active', !!this._tagOpen || !!this._tagFilter.size);
+        };
 
-    /* 右上角：標籤 / 版面 / 攤平（2026-08-10 從工具列移來，2026-08-11 手機也沿用）。
-       三者只作用於「目前這面牆」，放在牆的表頭比放在全域工具列更貼近作用範圍。
-       只在資料夾檢視出現 —— 搜尋牆與標籤模式下它們都沒有作用（理由見工具列那段）。
-       手機沿用同一套之後，「⋯ 更多」裡的標籤膠囊與攤平列就是重複入口，已一併移除。
-       ⚠️ 手機的表頭標題本來是置中的（2026-07-20 指定）。有按鈕時要改成左靠，
-          否則標題只會在「扣掉按鈕之後的剩餘空間」裡置中 → 看起來偏左、像沒對齊。
-          用 state class 而不是 :has()（上架規範禁用，見 07-31）。 */
-    if (!headOverride && folder && this.plugin.state.leftMode !== 'tag') {
-      const acts = head.createDiv('gn-head-acts');
-      const nTags = this.folderTags().length;
-      // 桌機只有標籤鈕；手機仍有版面/攤平兩顆（維持原況）
-      if (isMobileUI || nTags) head.addClass('gn-head-has-acts');
-      // 亮起的條件是「面板展開中」**或**「正在篩選」—— 面板收起來時仍看得出有套篩選
-      const filtering = !!(this._tagFilter && this._tagFilter.size);
-      const tagsBtn = this.mkBarBtn(acts, 'tags',
-        nTags ? t('Tags in this folder') + ' · ' + nTags : t('Tags in this folder'),
-        { on: filtering || !!this._tagOpen, disabled: !nTags, cls: 'gn-head-btn', key: 'tags' });
-      if (nTags) tagsBtn.onclick = (e) => {
-        e.stopPropagation();
-        this._tagOpen = !this._tagOpen;
-        // 只切 class，不重畫 —— 卡片會被 CSS 的高度補間自然推下去
-        const bar = this._main && this._main.querySelector('.gn-tagbar');
-        if (bar) bar.toggleClass('gn-tagbar-open', !!this._tagOpen);
-        tagsBtn.toggleClass('is-active', !!this._tagOpen || !!(this._tagFilter && this._tagFilter.size));
-      };
-
-      /* 手機維持原況：牆頭保留版面與攤平兩顆。
-         桌機已收攏到工具列的「視圖」選單（2026-11-18）。 */
-      if (isMobileUI) {
         const own = this.ownLayout();
         const eff = this._layout || 'overlay';
         const LAYOUTS_H = [['overlay', 'image', 'Photo'], ['stacked', 'frame', 'Museum'], ['editorial', 'type', 'Editor']];
@@ -6455,23 +6498,20 @@ class GalleryView extends ItemView {
           this.plugin.saveState();
           this.render();
         };
-      }
 
-      /* 內嵌標籤面板：表頭下方、卡片上方。展開時把卡片往下推（見 .gn-tagbar 的說明）。
-         ⚠️ 一律建立（只要有標籤），開合只切 class —— 這樣按鈕的 onclick 不必重畫，
-            也就沒有「重畫後錨點失效」的問題。 */
-      if (nTags) {
-        const bar = container.createDiv('gn-tagbar');
-        bar.toggleClass('gn-tagbar-open', !!this._tagOpen);
-        const inner = bar.createDiv('gn-tagbar-inner');
-        this.fillTagChips(inner, this.folderTags());
-        if (this._tagFilter && this._tagFilter.size) {
-          const clear = inner.createDiv('gn-tagbar-clear');
-          clear.setText(t('Clear'));
-          clear.onclick = () => { this._tagFilter = new Set(); this.rerenderMain(); };
-        }
+        if (nTags) this.renderTagbar(container);
+      }
+    } else {
+      /* 桌機：路徑、數量、標籤鈕都在常駐工具列；牆內不再有會捲走的表頭。 */
+      if (this._tagbarHost) this._tagbarHost.empty();
+      this.updateTopContext(folder || this.folderAt(this.path),
+        this._searchQ ? t('Search results') : (state.leftMode === 'tag' ? headText : ''));
+      this.syncTopTagButton();
+      if (this._tagbarHost && !headOverride && folder && state.leftMode !== 'tag') {
+        if (this.folderTags().length) this.renderTagbar(this._tagbarHost);
       }
     }
+
     // 狀態膠囊（攤平／標籤篩選）獨立成一列，放在卡片牆頂端、不再塞進工具列標題列（2026-07-20）：
     //   多選標籤時字串會很長（#a #b #c ✕），塞在工具列會把麵包屑擠爆＝破格。
     //   獨立一列後可自行換行（flex-wrap），長度再長也不影響工具列。
@@ -6508,9 +6548,10 @@ class GalleryView extends ItemView {
     // 此資料夾是否隱藏內文預覽
     const perFolderHide = folder ? (this.plugin.state.noPreviewFolders || []).includes(folder.path) : false;
 
-    if (countEl) {
-      countEl.setText(String(notes.length));
-      countEl.setAttr('title', t('{{n}} items', { n: notes.length }));
+    if (this._topCountEl && !isMobileUI) {
+      this._topCountEl.style.display = '';
+      this._topCountEl.setText(String(notes.length));
+      this._topCountEl.setAttr('title', t('{{n}} items', { n: notes.length }));
     }
 
     this.beginWall(container);
