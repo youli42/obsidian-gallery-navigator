@@ -1423,6 +1423,8 @@ class GalleryView extends ItemView {
     this.drag = null;         // { kind: 'note'|'folder', path, paths? }（paths＝多選批次）
     this.selected = new Set();   // 多選：檔案路徑
     this.selAnchor = null;       // 範圍選的錨點
+    this._treeFilterOn = false;  // 左樹名稱過濾（桌機）
+    this._treeFilter = '';
     /* 資料夾多選（2026-08-18）—— 跟卡片的 selected 分開放，不共用。
        兩者的批次操作對象不同（檔案 vs 資料夾），混在一起「移動」會分不清該搬什麼。
        folderSelMode 是**手機專用**的選取模式：手機沒有 Cmd/Shift，
@@ -3976,6 +3978,31 @@ class GalleryView extends ItemView {
     setTimeout(() => sinput.focus(), 0);
   }
 
+  /* 左樹名稱過濾（2026-11-18）：回傳 {visible, open}，沒有查詢時回傳 null。
+     visible＝命中的資料夾＋它們的祖先；open＝需要自動展開的祖先，讓命中項目一定看得到。 */
+  treeFilterSets() {
+    const q = String(this._treeFilter || '').trim().toLowerCase();
+    if (!q) return null;
+    const visible = new Set();
+    const open = new Set();
+    const walk = (folder, ancestors) => {
+      const self = String(folder.name || '').toLowerCase().includes(q);
+      let child = false;
+      for (const sub of subFolders(folder)) {
+        if (walk(sub, ancestors.concat(folder.path))) child = true;
+      }
+      const hit = self || child;
+      if (hit) {
+        visible.add(folder.path);
+        for (const a of ancestors) { visible.add(a); open.add(a); }
+        if (child) open.add(folder.path);
+      }
+      return hit;
+    };
+    for (const sub of subFolders(this.app.vault.getRoot())) walk(sub, []);
+    return { visible, open };
+  }
+
   renderInner() {
     const app = this.app;
     const root = this.contentEl;
@@ -4057,6 +4084,32 @@ class GalleryView extends ItemView {
     const split = root.createDiv('gn-split');
     const tree = split.createDiv('gn-tree');             // 左欄容器（flex 直向）
     tree.style.flex = '0 0 ' + (state.treeWidth || 232) + 'px';
+    /* 左樹名稱過濾（桌機）：輸入列在捲動區外，過濾時不會跟著列表重畫。 */
+    if (!isMobileUI && this._treeFilterOn && state.leftMode !== 'tag') {
+      const fw = tree.createDiv('gn-tree-filter');
+      setIcon(fw.createDiv('gn-tree-filter-ic'), 'filter');
+      const input = fw.createEl('input', { type: 'search', cls: 'gn-tree-filter-input' });
+      input.placeholder = t('Filter folders…');
+      input.value = this._treeFilter || '';
+      let filterTimer = null;
+      input.addEventListener('input', () => {
+        clearTimeout(filterTimer);
+        filterTimer = setTimeout(() => {
+          if (!input.isConnected) return;
+          this._treeFilter = input.value;
+          this.refreshTree();
+        }, 80);
+      });
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && !isImeKey(e)) {
+          e.stopPropagation();
+          this._treeFilterOn = false;
+          this._treeFilter = '';
+          this.render();
+        }
+      });
+      setTimeout(() => input.focus(), 0);
+    }
     const treeScroll = tree.createDiv('gn-tree-scroll');  // 可捲動的資料夾/標籤區
     /* 資料夾多選的操作條：擺在捲動區「之後」＝固定貼左欄底部，不隨樹捲動。
        預設 display:none，updateFolderSelBar() 有選取時才打開。 */
@@ -4123,12 +4176,21 @@ class GalleryView extends ItemView {
     modeBtn.onclick = () => {
       state.leftMode = state.leftMode === 'tag' ? 'folder' : 'tag';
       this.clearSearchState();
+      if (state.leftMode === 'tag') { this._treeFilterOn = false; this._treeFilter = ''; }
       this.plugin.saveState();
       this.render();
     };
 
-    /* 收起所有資料夾（2026-11-18）。桌機限定；手機沒有這個需求，維持原況。 */
+    /* 左樹工具（2026-11-18）。桌機限定；手機維持原況。 */
     if (!isMobileUI) {
+      if (state.leftMode !== 'tag') {
+        const filterBtn = btn.filter = this.mkBarBtn(tray, 'filter', t('Filter folders'), { on: this._treeFilterOn });
+        filterBtn.onclick = () => {
+          this._treeFilterOn = !this._treeFilterOn;
+          if (!this._treeFilterOn) this._treeFilter = '';
+          this.render();
+        };
+      }
       const collapseBtn = btn.collapse = this.mkBarBtn(tray, 'minimize-2', t('Collapse all folders'));
       collapseBtn.onclick = () => {
         state.expandedFolders = [];
@@ -4234,7 +4296,7 @@ class GalleryView extends ItemView {
     if (isMobileUI) {
       for (const k of ['new', 'mode', 'sort', 'search', 'more']) if (btn[k]) bar.appendChild(btn[k]);
     } else {
-      for (const k of ['mode', 'collapse']) if (btn[k]) topLeft.appendChild(btn[k]);
+      for (const k of ['mode', 'filter', 'collapse']) if (btn[k]) topLeft.appendChild(btn[k]);
       this.buildTopSearch(topRight);
       for (const k of ['sort', 'more', 'new']) if (btn[k]) topRight.appendChild(btn[k]);
     }
@@ -4391,6 +4453,7 @@ class GalleryView extends ItemView {
     const folderColors = state.folderColors || {};
     const hiddenSet = new Set(state.hiddenFolders || []);
     const expanded = new Set(state.expandedFolders || []);
+    const fs = this.treeFilterSets();
     // ★ 最愛捷徑（feature 3）：兩種模式都顯示在最上方
     this.renderFavorites(treeScroll);
 
@@ -4415,11 +4478,12 @@ class GalleryView extends ItemView {
       const fitems = subFolders(parentFolder).map((sub) =>
         ({ folder: sub, name: sub.name, count: folderFileCount(sub) }));
       const ordered = orderFolders(fitems, (state.folderOrder || {})[orderKey]);
-      const visible = this.showHidden ? ordered : ordered.filter((it) => !hiddenSet.has(it.folder.path));
+      let visible = this.showHidden ? ordered : ordered.filter((it) => !hiddenSet.has(it.folder.path));
+      if (fs) visible = visible.filter((it) => fs.visible.has(it.folder.path));
 
       for (const it of visible) {
         const hasKids = subFolders(it.folder).length > 0;
-        const isOpen = expanded.has(it.folder.path);
+        const isOpen = expanded.has(it.folder.path) || (!!fs && fs.open.has(it.folder.path));
         const isHidden = hiddenSet.has(it.folder.path);
 
         const row = treeScroll.createDiv('gn-tnode');
@@ -4672,6 +4736,9 @@ class GalleryView extends ItemView {
       }
     };
     buildLevel(this.app.vault.getRoot(), 1);
+    if (fs && !fs.visible.size) {
+      treeScroll.createDiv('gn-empty gn-tree-empty').setText(t('No matching folders'));
+    }
     }
     /* 資料夾多選的收尾（2026-08-18）。標籤模式沒有資料夾列可選 → 整組清掉，
        否則切去標籤模式再切回來，操作條會掛著一批看不見的選取。

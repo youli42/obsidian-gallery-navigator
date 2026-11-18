@@ -204,6 +204,32 @@ body:not(.is-mobile) .gn-split {
   overflow-y: auto; overflow-x: hidden;
   padding: 8px 10px 8px 6px;
 }
+/* 左樹名稱過濾（桌機，2026-11-18） */
+.gn-tree-filter {
+  flex: none;
+  display: flex; align-items: center; gap: 6px;
+  margin: 8px 10px 2px 6px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: var(--background-modifier-form-field);
+  border: 1px solid var(--background-modifier-border);
+}
+.gn-tree-filter:focus-within { border-color: var(--interactive-accent); }
+.gn-tree-filter-ic { flex: none; display: flex; color: var(--text-muted); }
+.gn-tree-filter-ic svg { width: 14px; height: 14px; }
+.gn-tree-filter .gn-tree-filter-input,
+.gn-tree-filter .gn-tree-filter-input:hover,
+.gn-tree-filter .gn-tree-filter-input:focus,
+.gn-tree-filter .gn-tree-filter-input:focus-visible,
+.gn-tree-filter .gn-tree-filter-input:active {
+  flex: 1; min-width: 0;
+  -webkit-appearance: none; appearance: none;
+  background: transparent; border: none; outline: none; box-shadow: none;
+  font-size: 12px; color: var(--text-normal); padding: 0;
+}
+.gn-tree-filter .gn-tree-filter-input::-webkit-search-cancel-button,
+.gn-tree-filter .gn-tree-filter-input::-webkit-search-decoration { display: none; }
+.gn-tree-empty { padding: 12px 8px; font-size: 12px; }
 
 /* ═══ 資料夾多選的操作條（2026-08-18）═══
    擺在 .gn-tree-scroll 之後、又是 flex 直向的最後一項 → 自然固定在左欄底部，
