@@ -1622,7 +1622,6 @@ class GalleryView extends ItemView {
     }
     this.plugin.state.expandedFolders = [...expanded];
     this.activePath = file.path;
-    this.clearSearchState();
     this.path = folderPath;
     this.plugin.state.lastPath = folderPath;
     this.plugin.saveState();
