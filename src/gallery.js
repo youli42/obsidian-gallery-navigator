@@ -6527,7 +6527,8 @@ class GallerySettingTab extends PluginSettingTab {
     const save = () => this.plugin.saveState();
     const reloadHint = () => new Notice(t('Takes effect after reloading the plugin (or restarting Obsidian)'), 5000);
 
-    /* ══ 0. 語言 ══ */
+    /* ══ 0. 一般 ══ */
+    this.group(containerEl, t('General'));
     new Setting(containerEl).setName(t('Language'))
       .setDesc(t('Interface language. Auto follows the Obsidian language setting.'))
       .addDropdown((d) => {
@@ -6565,6 +6566,8 @@ class GallerySettingTab extends PluginSettingTab {
         d.onChange((v) => { st.imageCardLayout = v; save(); this.plugin.refreshViews(); });
       });
 
+    /* ══ 2. 內容與快取 ══ */
+    this.group(containerEl, t('Content & cache'));
     new Setting(containerEl)
       .setName(t('Excalidraw thumbnails'))
       .setDesc(t('Renders each Excalidraw drawing into its card through the Excalidraw plugin, in the background, and only for cards on screen. With the plugin off, drawings stay plain text cards.'))
@@ -6642,6 +6645,8 @@ class GallerySettingTab extends PluginSettingTab {
     };
     void refreshCacheDesc();
 
+    /* ══ 3. 操作 ══ */
+    this.group(containerEl, t('Behavior'));
     new Setting(containerEl)
       .setName(t('Open notes without focusing the editor'))
       .setDesc(t('Notes opened from the gallery start unfocused, so a first-line image embed stays rendered instead of expanding to markdown. Click into the note to edit as usual.'))
@@ -6675,6 +6680,8 @@ class GallerySettingTab extends PluginSettingTab {
       .addToggle((tg) => tg.setValue(st.enableLightboxActions !== false)
         .onChange((v) => { st.enableLightboxActions = v; save(); }));
 
+    /* ══ 4. 效能 ══ */
+    this.group(containerEl, t('Performance'));
     new Setting(containerEl)
       .setName(t('Virtualized card wall'))
       .setDesc(t('In large folders, keeps only the cards near the viewport in the DOM and recycles the rest. Greatly reduces memory and scrolling lag. Turn off if you see layout jumps while scrolling.'))
