@@ -2449,8 +2449,8 @@ class GalleryView extends ItemView {
   }
 
   /* 資料夾右鍵：核心項目（New note / New folder / Rename / Make a copy / Delete）
-     ＋ 其他外掛透過 file-menu 註冊的資料夾動作；本外掛獨有的項目集中在
-     「Gallery Navigator」子選單，避免主選單被外掛功能塞滿。 */
+     ＋ 其他外掛透過 file-menu 註冊的資料夾動作；本外掛獨有的項目放在
+     「Gallery Navigator」分欄（標題項 + 平鋪項目），不折成二級選單。 */
   folderContextMenu(folder) {
     const menu = new Menu();
     this._menuSections(menu);
@@ -2471,58 +2471,64 @@ class GalleryView extends ItemView {
       this._menuItem(menu, 'system', (i) => i.setTitle(t('Reveal in Finder')).setIcon('folder-open')
         .onClick(() => this.revealInSystem(folder)));
     }
-    if (folder.path && folder.path !== '/') this._addGalleryFolderSubmenu(menu, folder);
+    if (folder.path && folder.path !== '/') this._addGalleryFolderSection(menu, folder);
     return menu;
   }
-  _addGalleryFolderSubmenu(menu, folder) {
+  /* 分欄標題。原生選單沒有「分欄」API，用 is-label 的停用項當標題；
+     底下所有項目同屬 view 分區，因此不會把 Gallery Navigator 再折成二級選單。 */
+  _addGalleryLabel(menu) {
+    menu.addItem((i) => {
+      i.setTitle('Gallery Navigator');
+      try { if (typeof i.setIsLabel === 'function') i.setIsLabel(true); } catch (e) {}
+      try { if (typeof i.setSection === 'function') i.setSection('view'); } catch (e) {}
+    });
+  }
+  _addGalleryFolderSection(menu, folder) {
     const state = this.plugin.state;
     const mobile = document.body.classList.contains('is-mobile');
-    menu.addItem((i) => {
-      i.setTitle('Gallery Navigator').setIcon(GN_ICON_ID);
-      try { if (typeof i.setSection === 'function') i.setSection('view'); } catch (e) {}
-      const sub = i.setSubmenu();
-      sub.addItem((s) => s.setTitle(t('Copy path')).setIcon('link').onClick(() => copyToClipboard(folder.path)));
-      sub.addItem((s) => s.setTitle(t('Move to…')).setIcon('folder-input').onClick(() =>
-        new FolderSuggest(this.app, (target) => this.moveItem(folder, target), folder.path).open()));
-      sub.addItem((s) => s.setTitle(t('Change icon')).setIcon('shapes').onClick(() => new IconPickerModal(
+    this._addGalleryLabel(menu);
+    this._menuItem(menu, 'view', (i) => i.setTitle(t('Copy path')).setIcon('link')
+      .onClick(() => copyToClipboard(folder.path)));
+    this._menuItem(menu, 'view', (i) => i.setTitle(t('Move to…')).setIcon('folder-input')
+      .onClick(() => new FolderSuggest(this.app, (target) => this.moveItem(folder, target), folder.path).open()));
+    this._menuItem(menu, 'view', (i) => i.setTitle(t('Change icon')).setIcon('shapes')
+      .onClick(() => new IconPickerModal(
         this.app,
         (state.folderIcons || {})[folder.path] || '',
         (name) => this.setFolderIconChoice(folder.path, name),
         () => this.setFolderIconChoice(folder.path, null),
       ).open()));
-      sub.addItem((s) => {
-        s.setTitle(t('Color')).setIcon('palette');
-        const cs = s.setSubmenu();
-        const cur = (state.folderColors || {})[folder.path] || null;
-        cs.addItem((c) => c.setTitle(t('Auto (by name)')).setChecked(!cur)
-          .onClick(() => this.setFolderColor(folder.path, null)));
-        PALETTE.forEach((p) => {
-          cs.addItem((c) => {
-            c.setTitle(t(p.label)).setIcon('circle').setChecked(cur === p.key)
-              .onClick(() => this.setFolderColor(folder.path, p.key));
-            try { if (c.iconEl) { c.iconEl.style.color = p.bg; c.iconEl.style.fill = p.bg; } } catch (e) {}
-          });
+    this._menuItem(menu, 'view', (i) => {
+      i.setTitle(t('Color')).setIcon('palette');
+      const cs = i.setSubmenu();
+      const cur = (state.folderColors || {})[folder.path] || null;
+      cs.addItem((c) => c.setTitle(t('Auto (by name)')).setChecked(!cur)
+        .onClick(() => this.setFolderColor(folder.path, null)));
+      PALETTE.forEach((p) => {
+        cs.addItem((c) => {
+          c.setTitle(t(p.label)).setIcon('circle').setChecked(cur === p.key)
+            .onClick(() => this.setFolderColor(folder.path, p.key));
+          try { if (c.iconEl) { c.iconEl.style.color = p.bg; c.iconEl.style.fill = p.bg; } } catch (e) {}
         });
       });
-      sub.addSeparator();
-      sub.addItem((s) => s.setTitle(this.isFavorite('folder', folder.path) ? t('Remove from favorites') : t('Add to favorites'))
-        .setIcon('star').onClick(() => this.toggleFavorite('folder', folder.path)));
-      sub.addItem((s) => s.setTitle(t('Show text preview')).setIcon('text')
-        .setChecked(!(state.noPreviewFolders || []).includes(folder.path))
-        .onClick(() => this.toggleFolderPreview(folder.path)));
-      sub.addItem((s) => {
-        const hidden = (state.hiddenFolders || []).includes(folder.path);
-        s.setTitle(hidden ? t('Unhide') : t('Hide this folder'))
-          .setIcon(hidden ? 'eye' : 'eye-off')
-          .onClick(() => this.setFolderHidden(folder.path, !hidden));
-      });
-      if (mobile) {
-        sub.addItem((s) => s.setTitle(t('Reorder folders')).setIcon('arrow-up-down')
-          .onClick(() => this.enterFolderReorderMode()));
-      }
     });
+    this._menuItem(menu, 'view', (i) => i.setTitle(this.isFavorite('folder', folder.path) ? t('Remove from favorites') : t('Add to favorites'))
+      .setIcon('star').onClick(() => this.toggleFavorite('folder', folder.path)));
+    this._menuItem(menu, 'view', (i) => i.setTitle(t('Show text preview')).setIcon('text')
+      .setChecked(!(state.noPreviewFolders || []).includes(folder.path))
+      .onClick(() => this.toggleFolderPreview(folder.path)));
+    this._menuItem(menu, 'view', (i) => {
+      const hidden = (state.hiddenFolders || []).includes(folder.path);
+      i.setTitle(hidden ? t('Unhide') : t('Hide this folder'))
+        .setIcon(hidden ? 'eye' : 'eye-off')
+        .onClick(() => this.setFolderHidden(folder.path, !hidden));
+    });
+    if (mobile) {
+      this._menuItem(menu, 'view', (i) => i.setTitle(t('Reorder folders')).setIcon('arrow-up-down')
+        .onClick(() => this.enterFolderReorderMode()));
+    }
   }
-  /* 多選資料夾右鍵：保留原生的「新建資料夾 / 刪除」，外掛操作收進子選單。 */
+  /* 多選資料夾右鍵：保留原生的「新建資料夾 / 刪除」，外掛操作放在 Gallery Navigator 分欄。 */
   multiFolderMenu(folder) {
     const menu = new Menu();
     this._menuSections(menu);
@@ -2535,15 +2541,11 @@ class GalleryView extends ItemView {
           if (f instanceof TFolder) { try { await this.app.fileManager.promptForDeletion(f); } catch (e) {} }
         }
       }));
-    menu.addItem((i) => {
-      i.setTitle('Gallery Navigator').setIcon(GN_ICON_ID);
-      try { if (typeof i.setSection === 'function') i.setSection('view'); } catch (e) {}
-      const sub = i.setSubmenu();
-      sub.addItem((s) => s.setTitle(t('Move {{n}} folders to…', { n: this.selFolders.size })).setIcon('folder-input')
-        .onClick(() => this.moveSelectedFolders()));
-      sub.addItem((s) => s.setTitle(t('Clear selection')).setIcon('x')
-        .onClick(() => this.clearFolderSel()));
-    });
+    this._addGalleryLabel(menu);
+    this._menuItem(menu, 'view', (i) => i.setTitle(t('Move {{n}} folders to…', { n: this.selFolders.size }))
+      .setIcon('folder-input').onClick(() => this.moveSelectedFolders()));
+    this._menuItem(menu, 'view', (i) => i.setTitle(t('Clear selection')).setIcon('x')
+      .onClick(() => this.clearFolderSel()));
     return menu;
   }
 
@@ -4341,12 +4343,9 @@ class GalleryView extends ItemView {
       if (this.folderReorderMode) return null;   // 排序模式中長按不開選單（出口在底部操作條）
       const menu = this.newMenuForFolder(this.app.vault.getRoot());
       if (document.body.classList.contains('is-mobile')) {
-        menu.addItem((i) => {
-          i.setTitle('Gallery Navigator').setIcon(GN_ICON_ID);
-          const sub = i.setSubmenu();
-          sub.addItem((s) => s.setTitle(t('Reorder folders')).setIcon('arrow-up-down')
-            .onClick(() => this.enterFolderReorderMode()));
-        });
+        this._addGalleryLabel(menu);
+        this._menuItem(menu, 'view', (i) => i.setTitle(t('Reorder folders')).setIcon('arrow-up-down')
+          .onClick(() => this.enterFolderReorderMode()));
       }
       return menu;
     });
@@ -7785,10 +7784,13 @@ class GalleryPlugin extends Plugin {
       if (this._suppressGalleryFolderMenu) return;   // 畫廊自己在組選單時避免遞迴
       if (!(file instanceof TFolder)) return;
       menu.addItem((i) => {
-        i.setTitle('Gallery Navigator').setIcon(GN_ICON_ID);
+        i.setTitle('Gallery Navigator');
+        try { if (typeof i.setIsLabel === 'function') i.setIsLabel(true); } catch (e) {}
         try { if (typeof i.setSection === 'function') i.setSection('view'); } catch (e) {}
-        const sub = i.setSubmenu();
-        sub.addItem((s) => s.setTitle(t('Open in Gallery Navigator')).setIcon(GN_ICON_ID)
+      });
+      menu.addItem((i) => {
+        try { if (typeof i.setSection === 'function') i.setSection('view'); } catch (e) {}
+        i.setTitle(t('Open in Gallery Navigator')).setIcon(GN_ICON_ID)
           .onClick(async () => {
             await this.activateView();
             const path = file.path && file.path !== '/' ? file.path : '';
@@ -7808,7 +7810,7 @@ class GalleryPlugin extends Plugin {
                 v.navigate(path);
               }
             }
-          }));
+          });
       });
     }));
   }
