@@ -111,6 +111,8 @@ const ZH_TW = {
   'Open in new tab': '新分頁開啟',
   'Folder': '資料夾',
   'Note': '筆記',
+  'New note': '新筆記',
+  'Make a copy': '建立副本',
   'Canvas': 'Canvas 白板',
   'Base': 'Base 資料庫',
   // 2026-08-11 Mini Calendar 移除後仍共用的一條（原本在「月曆」群組）
@@ -414,6 +416,8 @@ const ZH_CN = {
   'Open in new tab': '在新标签页打开',
   'Folder': '文件夹',
   'Note': '笔记',
+  'New note': '新建笔记',
+  'Make a copy': '创建副本',
   'Canvas': 'Canvas 白板',
   'Base': 'Base 数据库',
   'Refresh': '刷新',           // 工具列「⋯ 更多」的刷新
