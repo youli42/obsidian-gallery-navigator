@@ -278,6 +278,14 @@ const ZH_TW = {
   'Open notes without focusing the editor': '開啟筆記時不聚焦編輯器',
   'Notes opened from the gallery start unfocused, so a first-line image embed stays rendered instead of expanding to markdown. Click into the note to edit as usual.':
     '從畫廊開啟的筆記先不聚焦——首行的嵌入圖片會維持顯示、不展開成 markdown 原始碼。點進內文即可照常編輯。',
+  'Drag cards out to other apps': '把卡片拖出到其他程式',
+  'Hold the modifier while dragging a card to drag the real files into other programs (chat, mail, browser uploads). Without it, dragging still moves the selected notes to folders inside the gallery. "Always" turns off dropping cards onto folders.':
+    '按住修飾鍵拖曳卡片，會把真正的檔案拖到其他程式（聊天、郵件、瀏覽器上傳）。不按修飾鍵時，拖曳仍然是在畫廊內把選取的筆記搬到資料夾。「永遠」會關閉卡片拖到資料夾的功能。',
+  'Ctrl / Cmd': 'Ctrl / Cmd',
+  'Alt / Option': 'Alt / Option',
+  'Always': '永遠',
+  'Off': '關閉',
+  'Hold {{mod}} while dragging a card to other apps': '按住 {{mod}} 拖曳卡片可放到其他程式',
 
   // ── 淨化連結 ──
   'Clean links': '淨化連結',
@@ -555,6 +563,14 @@ const ZH_CN = {
   'Open notes without focusing the editor': '打开笔记时不聚焦编辑器',
   'Notes opened from the gallery start unfocused, so a first-line image embed stays rendered instead of expanding to markdown. Click into the note to edit as usual.':
     '从画廊打开的笔记默认不聚焦——首行的嵌入图片会保持显示、不展开成 markdown 源码。点击进入正文即可照常编辑。',
+  'Drag cards out to other apps': '把卡片拖出到其他程序',
+  'Hold the modifier while dragging a card to drag the real files into other programs (chat, mail, browser uploads). Without it, dragging still moves the selected notes to folders inside the gallery. "Always" turns off dropping cards onto folders.':
+    '按住修饰键拖拽卡片，会把真正的文件拖到其他程序（聊天、邮件、浏览器上传）。不按修饰键时，拖拽仍然是在画廊内把选中的笔记移动到文件夹。“永远”会关闭卡片拖到文件夹的功能。',
+  'Ctrl / Cmd': 'Ctrl / Cmd',
+  'Alt / Option': 'Alt / Option',
+  'Always': '永远',
+  'Off': '关闭',
+  'Hold {{mod}} while dragging a card to other apps': '按住 {{mod}} 拖拽卡片可拖到其他程序',
 
   // ── 链接净化 ──
   'Clean links': '链接净化',

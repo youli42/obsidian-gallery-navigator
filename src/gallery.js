@@ -62,6 +62,11 @@ const GN_ICON_SVG =
   '<rect x=".9" y="13.7" width="4.3" height="4.3" rx="1.3" ry="1.3"/>' +
   '</g>';
 
+/* 卡片拖出到系統（2026-11-18）：1×1 透明 PNG。
+   Electron 的 startDrag 在 macOS 要求拖曳圖示非空，用 data URL 就不必多帶一個檔案。 */
+const DRAG_OUT_ICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
+const DRAG_OUT_MODES = ['ctrl', 'alt', 'always', 'off'];
+
 
 /* ===== 併發閘（2026-08-12）=====
  *
@@ -1415,7 +1420,7 @@ class GalleryView extends ItemView {
     this.plugin = plugin;
     this.path = plugin.state.lastPath || '';
     this.showHidden = false;
-    this.drag = null;         // { kind: 'note'|'folder', path }
+    this.drag = null;         // { kind: 'note'|'folder', path, paths? }（paths＝多選批次）
     this.selected = new Set();   // 多選：檔案路徑
     this.selAnchor = null;       // 範圍選的錨點
     /* 資料夾多選（2026-08-18）—— 跟卡片的 selected 分開放，不共用。
@@ -1771,6 +1776,81 @@ class GalleryView extends ItemView {
     requestAnimationFrame(blurNow);
     window.setTimeout(blurNow, 60);
     window.setTimeout(blurNow, 160);
+  }
+
+  /* ===== 卡片拖出到系統（2026-11-18）=====
+     Obsidian 的 dragManager 只在 dataTransfer 裡放 obsidian:// 網址，其他程式收到的是連結、
+     不是檔案。要像從檔案總管拖出來，得走 Electron 的 webContents.startDrag。
+
+     ⚠️ startDrag 會接管整次拖曳：Windows 上 Obsidian 自己就不再是 drop target
+        （electron/electron#7118），所以「一般拖曳也拖出」和「拖到左側資料夾搬移」
+        不可能同時成立。做法是修飾鍵分流：按住指定鍵＝拖出到系統，其餘維持內部搬移。 */
+  dragOutMode() {
+    if (document.body.classList.contains('is-mobile')) return 'off';
+    const mode = this.plugin.state.dragOut || 'ctrl';
+    return DRAG_OUT_MODES.includes(mode) ? mode : 'ctrl';
+  }
+  wantsDragOut(e) {
+    const mode = this.dragOutMode();
+    if (mode === 'off') return false;
+    if (mode === 'always') return true;
+    if (mode === 'alt') return !!e.altKey;
+    return !!(e.ctrlKey || e.metaKey);   // 'ctrl'：Windows/Linux Ctrl、macOS Cmd
+  }
+  // vault 相對路徑 → 磁碟絕對路徑（startDrag 只吃絕對路徑）
+  dragOutPath(file) {
+    try {
+      const adapter = this.app.vault.adapter;
+      const base = adapter && typeof adapter.getBasePath === 'function' ? adapter.getBasePath() : '';
+      if (!base) return null;
+      const sep = base.indexOf('\\') >= 0 ? '\\' : '/';
+      return base.replace(/[\\/]+$/, '') + sep + String(file.path).split('/').join(sep);
+    } catch (e) { return null; }
+  }
+  /* 取 Electron webContents。@electron/remote 優先，退回舊版 electron.remote
+     （Obsidian 目前兩者其一都還在；取不到就代表這個環境不支援原生拖曳）。 */
+  electronWebContents() {
+    try {
+      const req = typeof window !== 'undefined' && typeof window.require === 'function'
+        ? window.require.bind(window) : null;
+      if (!req) return null;
+      try {
+        const remote = req('@electron/remote');
+        if (remote && typeof remote.getCurrentWebContents === 'function') return remote.getCurrentWebContents();
+      } catch (e) {}
+      const electron = req('electron');
+      if (electron && electron.remote && typeof electron.remote.getCurrentWebContents === 'function') {
+        return electron.remote.getCurrentWebContents();
+      }
+    } catch (e) {}
+    return null;
+  }
+  /* 回傳 true ＝ 已交給系統拖曳，呼叫端不要再走 Obsidian 內部拖曳。 */
+  startFileDrag(files) {
+    const paths = files.map((f) => this.dragOutPath(f)).filter(Boolean);
+    if (!paths.length) return false;
+    const wc = this.electronWebContents();
+    if (!wc || typeof wc.startDrag !== 'function') return false;
+    let icon;
+    try {
+      const req = window.require.bind(window);
+      icon = req('electron').nativeImage.createFromDataURL(DRAG_OUT_ICON);
+    } catch (e) { icon = undefined; }
+    try {
+      /* files 會覆寫 file，一次把整批選取交給系統（Electron 28+）。
+         舊版只認 file 時至少也會拖出第一張，不會整個沒反應。 */
+      wc.startDrag(paths.length > 1
+        ? { file: paths[0], files: paths, icon }
+        : { file: paths[0], icon });
+      return true;
+    } catch (e) {
+      console.warn('[Gallery Navigator] native file drag failed', e);
+      return false;
+    }
+  }
+  clearCardDragMarks() {
+    if (!this.contentEl) return;
+    for (const el of this.contentEl.findAll('.gn-card-dragging')) el.removeClass('gn-card-dragging');
   }
 
   // （2026-07-20 移除）連結牆整套下架：outgoingMdFiles / incomingMdFiles / showLinks / renderLinksWall 一併移除。
@@ -3487,8 +3567,9 @@ class GalleryView extends ItemView {
     const d = this.drag;
     if (!d || !targetFolder) return false;
     // 拖曳的是「已選取的筆記」且有多選 → 批次移動全部選取
-    if (d.kind === 'note' && this.selected.size > 1 && this.selected.has(d.path)) {
-      const paths = [...this.selected];
+    // （用拖曳當下快照的 d.paths，不再回頭看 selected：拖到一半選取被改掉也不會漏搬）
+    if (d.kind === 'note' && d.paths && d.paths.length > 1) {
+      const paths = d.paths.slice();
       (async () => {
         let ok = 0, skipped = 0;
         for (const p of paths) {
@@ -5132,6 +5213,14 @@ class GalleryView extends ItemView {
     for (const el of this.cardElsFor(path)) el.toggleClass('gn-card-selected', this.selected.has(path));
     this.updateSelBar();
   }
+  /* 桌機點一下只選這一張（檔案總管行為），把其他卡片取消選取。 */
+  selectOnly(path) {
+    this.clearSel();
+    this.selected.add(path);
+    for (const el of this.cardElsFor(path)) el.addClass('gn-card-selected');
+    this.selAnchor = path;
+    this.updateSelBar();
+  }
   rangeSel(a, b) {
     const order = this._cardOrder || [];
     let ia = order.indexOf(a), ib = order.indexOf(b);
@@ -5165,7 +5254,14 @@ class GalleryView extends ItemView {
     const n = this.selected.size;
     if (!n) { bar.style.display = 'none'; return; }
     bar.style.display = '';
-    bar.createSpan('gn-selbar-count').setText(t('{{n}} selected', { n }));
+    const countEl = bar.createSpan('gn-selbar-count').setText(t('{{n}} selected', { n }));
+    // 桌機：把「怎麼拖出到其他程式」掛在計數上，免得只有設定頁看得到（手機不適用）
+    const dragOut = this.dragOutMode();
+    if (dragOut === 'ctrl' || dragOut === 'alt') {
+      countEl.setAttr('title', t('Hold {{mod}} while dragging a card to other apps', {
+        mod: dragOut === 'alt' ? 'Alt / Option' : 'Ctrl / Cmd',
+      }));
+    }
     const mk = (label, icon, fn, warn) => {
       const b = bar.createDiv('gn-selbar-btn' + (warn ? ' gn-selbar-warn' : ''));
       setIcon(b, icon); b.setAttr('title', label);
@@ -5488,6 +5584,10 @@ class GalleryView extends ItemView {
   // 建一個瀑布流 grid。一面牆可以有多個（連結 / 反向連結各一區）
   makeGrid(container) {
     const grid = container.createDiv('gn-grid');
+    // 點空白處取消選取（檔案總管行為）；卡片自己有 click handler，target 不會是 grid
+    grid.addEventListener('click', (e) => {
+      if (e.target === grid && this.selected.size) this.clearSel();
+    });
     // 換資料夾／換標籤時，整面牆淡入一次（同一個位置重畫則不動，避免捲動時閃）
     if (this.motionOk()) {
       const key = (this.plugin.state.leftMode === 'tag' ? 'tag:' : 'dir:') + (this.path || '');
@@ -5759,17 +5859,51 @@ class GalleryView extends ItemView {
         // 範圍選取的錨點：優先用上次複選的卡，沒有就用目前開啟中的卡
         this.rangeSel(this.selAnchor || this.activePath, it.file.path);
       }
-      else if (this.selected.size) { this.clearSel(); }
-      else { this.openNote(it.file, false); }
+      /* 桌機比照檔案總管：點一下只選取，雙擊才開啟（2026-11-18）。
+         手機沒有雙擊手勢，維持點一下開啟，否則卡片會完全打不開。 */
+      else if (document.body.classList.contains('is-mobile')) {
+        this.openNote(it.file, false);
+      }
+      else {
+        this.selectOnly(it.file.path);
+      }
     };
+    card.addEventListener('dblclick', (e) => {
+      if (ndrag) return;
+      if (document.body.classList.contains('is-mobile')) return;   // 手機單擊已開啟
+      if (e.metaKey || e.ctrlKey || e.shiftKey) return;            // 修飾鍵留給選取
+      this.openNote(it.file, false);
+    });
 
-    // 拖曳搬移：把筆記拖到左側資料夾列
+    // 拖曳：拖到左側資料夾列（內部搬移），或按修飾鍵把整批檔案拖出到其他程式
     card.setAttr('draggable', 'true');
     card.addEventListener('dragstart', (e) => {
       ndrag = true;
-      this.drag = { kind: 'note', path: it.file.path };   // GN 內部用（拖到樹狀圖搬檔案）
-      card.addClass('gn-card-dragging');
+      /* 被拖的卡不在選取集裡 → 只選它再拖（檔案總管行為）。
+         否則拖一張沒選取的卡，會莫名其妙拖走上一批選取的其他檔案。 */
+      if (!this.selected.has(it.file.path)) this.selectOnly(it.file.path);
+
+      const selectedFiles = [...this.selected]
+        .map((p) => asFile(this.app, p))
+        .filter((f) => f instanceof TFile);
+      if (!selectedFiles.some((f) => f.path === it.file.path)) selectedFiles.push(it.file);
+      const batch = selectedFiles.length > 1 ? selectedFiles.map((f) => f.path) : null;
+      this.drag = { kind: 'note', path: it.file.path, paths: batch };   // GN 內部用（拖到樹狀圖搬檔案）
+      // 整批都要看起來在動；只有被抓的那張變淡會像沒選到其他的
+      for (const f of selectedFiles) {
+        for (const el of this.cardElsFor(f.path)) el.addClass('gn-card-dragging');
+      }
       if (e.dataTransfer) e.dataTransfer.effectAllowed = 'all';
+
+      /* 拖出到系統：startDrag 會接管整次拖曳，成功就不再走 Obsidian 的內部拖曳。 */
+      if (this.wantsDragOut(e) && this.startFileDrag(selectedFiles)) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.drag = null;                 // 系統拖曳不會觸發我們自己的 dragend
+        this.clearCardDragMarks();
+        setTimeout(() => { ndrag = false; }, 0);
+        return;
+      }
 
       /* 讓 Canvas / 編輯器 / 其他外掛也收得到（2026-08-01）。
          以前只設了 effectAllowed，dataTransfer 裡什麼都沒放 → 卡片只能在 GN 內部拖，
@@ -5779,6 +5913,7 @@ class GalleryView extends ItemView {
            dragFile(evt, file, source) 會 ① 把 obsidian:// 網址寫進 dataTransfer
                                         ② 回傳 { type:'file', file, icon, title } 描述物件
            再交給 onDragStart(evt, draggable)。
+         多選時改用 dragFiles，Canvas 才拿得到「多個檔案」而不是只有被抓的那一張。
          Canvas 是用 dragManager.handleDrop 接收，走同一條路才會變成「檔案節點」，
          而不是純文字節點。
 
@@ -5787,8 +5922,14 @@ class GalleryView extends ItemView {
             至少還能拖出一個文字節點，不會整個沒反應。 */
       try {
         const dm = this.app.dragManager;
-        if (dm && typeof dm.dragFile === 'function' && typeof dm.onDragStart === 'function') {
-          dm.onDragStart(e, dm.dragFile(e, it.file, 'gallery-navigator'));
+        if (dm && typeof dm.onDragStart === 'function') {
+          if (selectedFiles.length > 1 && typeof dm.dragFiles === 'function') {
+            dm.onDragStart(e, dm.dragFiles(e, selectedFiles, 'gallery-navigator'));
+          } else if (typeof dm.dragFile === 'function') {
+            dm.onDragStart(e, dm.dragFile(e, it.file, 'gallery-navigator'));
+          } else if (e.dataTransfer) {
+            e.dataTransfer.setData('text/plain', '[[' + it.file.basename + ']]');
+          }
         } else if (e.dataTransfer) {
           e.dataTransfer.setData('text/plain', '[[' + it.file.basename + ']]');
         }
@@ -5798,7 +5939,7 @@ class GalleryView extends ItemView {
     });
     card.addEventListener('dragend', () => {
       this.drag = null;
-      card.removeClass('gn-card-dragging');
+      this.clearCardDragMarks();
       setTimeout(() => { ndrag = false; }, 0);
     });
 
@@ -6384,6 +6525,21 @@ class GallerySettingTab extends PluginSettingTab {
       .setDesc(t('Notes opened from the gallery start unfocused, so a first-line image embed stays rendered instead of expanding to markdown. Click into the note to edit as usual.'))
       .addToggle((tg) => tg.setValue(st.openUnfocused !== false)
         .onChange((v) => { st.openUnfocused = v; save(); }));
+
+    /* 拖出到系統（2026-11-18）。Electron 的原生拖曳無法和 Obsidian 內部的
+       drop target 並存（見 dragOut 的說明），所以只能靠修飾鍵分流；
+       「永遠」= 放棄卡片拖到資料夾的內部搬移，換取直接拖出。 */
+    new Setting(containerEl)
+      .setName(t('Drag cards out to other apps'))
+      .setDesc(t('Hold the modifier while dragging a card to drag the real files into other programs (chat, mail, browser uploads). Without it, dragging still moves the selected notes to folders inside the gallery. "Always" turns off dropping cards onto folders.'))
+      .addDropdown((d) => {
+        d.addOption('ctrl', t('Ctrl / Cmd'));
+        d.addOption('alt', t('Alt / Option'));
+        d.addOption('always', t('Always'));
+        d.addOption('off', t('Off'));
+        d.setValue(st.dragOut || 'ctrl');
+        d.onChange((v) => { st.dragOut = v; save(); });
+      });
 
     new Setting(containerEl)
       .setName(t('Match the mobile drawer to the gallery'))
@@ -7045,7 +7201,7 @@ class GalleryPlugin extends Plugin {
        本機那份優先；升級後第一次執行還沒有 → 沿用 data.json 裡的（以前都存在那裡）。 */
     const disk = (await this.loadData()) || {};
     const localSaved = this.loadLocalState();
-    this.state = Object.assign({ lastPath: '', cardWidth: 120, sort: 'new', folderOrder: {}, hiddenFolders: [], folderColors: {}, expandedFolders: [], treeWidth: 232, treeCollapsed: false, syncActive: true, leftMode: 'folder', activeTag: '', expandedTags: [], cardColors: {}, noPreviewFolders: [], folderLayouts: {}, favorites: [], pinnedCards: [], assetTags: {}, lang: '', openUnfocused: true, imageCardLayout: 'stacked', autoCardColor: false, excalidrawThumbs: true, videoCovers: true, videoCoverMaxMB: 0, coverCacheMB: 0 }, disk, localSaved ? splitState(localSaved).local : null);
+    this.state = Object.assign({ lastPath: '', cardWidth: 120, sort: 'new', folderOrder: {}, hiddenFolders: [], folderColors: {}, expandedFolders: [], treeWidth: 232, treeCollapsed: false, syncActive: true, leftMode: 'folder', activeTag: '', expandedTags: [], cardColors: {}, noPreviewFolders: [], folderLayouts: {}, favorites: [], pinnedCards: [], assetTags: {}, lang: '', openUnfocused: true, imageCardLayout: 'stacked', autoCardColor: false, excalidrawThumbs: true, videoCovers: true, videoCoverMaxMB: 0, coverCacheMB: 0, dragOut: 'ctrl' }, disk, localSaved ? splitState(localSaved).local : null);
     /* 舊版 dev 把封面快取上限存在 xcalCacheMB（2026-11-16 同日改名為 coverCacheMB）。
        不繼承的話，調過上限的人會悄悄回到預設值（桌機 200MB、手機 50MB）。
        ⚠️ 只有在「舊版寫過、新版還來不及寫」時才套用：一旦 data.json 有 coverCacheMB
