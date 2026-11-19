@@ -65,6 +65,22 @@ const clean = (s, opt) => cleanText(s, opt).text;
   ok('中文標點、括號、多條網址');
 }
 
+// ── 補充黑名單與「通用名稱只在特定網域才算追蹤碼」──
+{
+  for (const [url, want] of [
+    ['https://a.com/x?mkt_tok=abc', 'https://a.com/x'],
+    ['https://a.com/x?_kx=abc', 'https://a.com/x'],
+    ['https://a.com/x?ef_id=abc', 'https://a.com/x'],
+    ['https://a.com/x?s_kwcid=abc', 'https://a.com/x'],
+    ['https://a.com/x?spm=a1z.2', 'https://a.com/x'],
+    ['https://docs.example.com/d?share_token=abc', 'https://docs.example.com/d'],
+  ]) assert.strictEqual(cleanUrl(url), want, url);
+  // 通用名：Amazon 才砍，其他站保留（免得誤刪功能參數）
+  assert.strictEqual(cleanUrl('https://www.amazon.com/dp/X?psc=1&tag=t-20'), 'https://www.amazon.com/dp/X');
+  assert.strictEqual(cleanUrl('https://example.com/doc?psc=2&awc=3'), 'https://example.com/doc?psc=2&awc=3');
+  ok('补充追踪参数；psc／awc 只在 Amazon 生效');
+}
+
 // ── 使用者自訂保留名單優先於黑名單 ──
 {
   const opt = { state: { cleanLinkKeep: 'utm_source' } };

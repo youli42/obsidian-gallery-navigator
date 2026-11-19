@@ -31,21 +31,22 @@ const EXACT = new Set([
   'ved', 'usg', 'sca_esv', 'sourceid',
   // 其他廣告平台
   'msclkid', 'twclid', 'ttclid', 'li_fat_id', 'epik', 'yclid', 'rb_clickid',
-  'irclickid', 'cjevent', 'awc',
+  'irclickid', 'cjevent', 'ef_id', 's_kwcid',          // Adobe / Microsoft Ads
   // EDM / CRM
   'mc_cid', 'mc_eid', 'ml_subscriber', 'ml_subscriber_hash', 'vgo_ee',
+  'mkt_tok', '_kx',                                    // Marketo / Klaviyo
   'hsCtaTracking', 'elqTrackId', 'elqTrack', 'sc_campaign', 'sc_channel',
   'sc_content', 'sc_medium', 'sc_outcome', 'sc_geo', 'sc_country',
   // 分析 / 站內來源標記
   '_ga', '_gl', '_openstat', 'icid', 'trk', 'trkCampaign', 'cmpid', 'cid_source',
-  'ito', 'ncid', 'oicd', 'spReportId', 'wtmc', 'wt_mc', 'ref_source', 'ref_src',
+  'ncid', 'oicd', 'spReportId', 'wtmc', 'wt_mc', 'ref_source', 'ref_src',
   'ref_url', 'referrer', 'campaign_id', 'campaignid', 'adgroupid', 'adid',
-  'share_id', 'share_source', 'share_medium', 'share_plat', 'share_tag',
+  'share_id', 'share_source', 'share_medium', 'share_plat', 'share_tag', 'share_token',
   'from_source', 'from_spmid', 'is_from_webapp', 'sender_device', 'sender_web_id',
-  'u_code', 'preview_pb', 'spm_id_from', 'vd_source', 'bbid',
+  'u_code', 'preview_pb', 'spm_id_from', 'spm', 'vd_source', 'bbid',   // spm／spm_id_from：淘宝／B 站
   // Amazon
   'pd_rd_w', 'pd_rd_r', 'pd_rd_wg', 'pf_rd_p', 'pf_rd_r', 'linkCode',
-  'creativeASIN', 'ascsubtag', 'psc',
+  'creativeASIN', 'ascsubtag',
 ]);
 
 /* ── 黑名單：前綴比對（大小寫不敏感） ── */
@@ -63,7 +64,9 @@ const HOST_EXTRA = [
   { test: /(^|\.)(x\.com|twitter\.com|t\.co)$/i,          names: ['s', 't', 'cxt'] },
   { test: /(^|\.)(youtube\.com|youtu\.be|music\.youtube\.com)$/i, names: ['si', 'pp', 'feature', 'ab_channel'] },
   { test: /(^|\.)(spotify\.com|spoti\.fi)$/i,             names: ['si', 'nd', 'context'] },
-  { test: /(^|\.)(amazon\.[a-z.]+|amzn\.to)$/i,           names: ['ref', 'ref_', 'tag', 'th', 'creative'] },
+  /* psc / awc 是 Amazon 的追蹤碼，但名字在其他站也可能是功能參數（以前放在全站
+     EXACT 裡，example.com?psc=2 會被無條件清掉）→ 只對 Amazon 生效。 */
+  { test: /(^|\.)(amazon\.[a-z.]+|amzn\.to)$/i,           names: ['ref', 'ref_', 'tag', 'th', 'creative', 'psc', 'awc'] },
   { test: /(^|\.)(tiktok\.com)$/i,                        names: ['_r', '_t', 'refer', 'checksum'] },
   { test: /(^|\.)(bilibili\.com|b23\.tv)$/i,              names: ['spm_id_from', 'from', 'seid', 'buvid'] },
   { test: /(^|\.)(medium\.com)$/i,                        names: ['source', 'sk'] },
