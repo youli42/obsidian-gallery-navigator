@@ -1903,6 +1903,9 @@ class GalleryView extends ItemView {
   wireContextMenu(el, build) {
     // 回傳 true ＝ 真的開了選單。長按路徑靠這個決定要不要震動 / 攔 click
     const open = (x, y, ctx) => {
+      /* 元素已被換頁／重畫換掉（長按計時器 500ms 內剛好切了資料夾或關了視圖）：
+         不要在舊座標彈出針對舊項目的選單。 */
+      if (!el.isConnected) return false;
       const m = build(ctx || {});
       if (!m) return false;
       m.showAtPosition({ x, y });
