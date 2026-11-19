@@ -1989,6 +1989,97 @@ class GalleryView extends ItemView {
     else root.style.removeProperty('--gn-card-radius');
   }
 
+  /* ── 卡片大小的「檔位」模型（2026-11-19）──
+     原本這段計算只活在「⋯ 更多」面板的滑桿裡。Ctrl+滾輪縮放要「與面板的卡片大小
+     效果一致」，所以抽出來讓兩邊共用同一份檔位表：同一個畫面上，兩條路徑算出的
+     最小欄寬與欄數必然相同，不會出現「滑桿排 4 欄、滾輪排 5 欄」的落差。
+
+     回傳：steps＝每個欄數的第一個最小欄寬（滑桿的每一格）；
+           colsAt(v)＝最小欄寬 v 會排幾欄。 */
+  cardSizeModel() {
+    // 編輯風索引卡有欄寬下限（縮圖 94 + 內距塞不下更窄）→ 起點跟著提高
+    const zMin = this.effectiveLayout() === 'editorial' ? GN_EDITORIAL_MIN_COL : 120;
+    const GAP = 16;   // 與 makeGrid 建 MasonryLayout 時的 gap 一致
+    /* 量「卡片牆容器」的寬度，不是 .gn-main —— MasonryLayout 量的就是 .gn-grid，
+       用 .gn-main 會多算它的左右 padding，算出來的斷點會偏掉一格。 */
+    const grid = this._main && this._main.querySelector('.gn-grid');
+    const W = (grid && grid.clientWidth) || (this._main ? this._main.clientWidth - 30 : 800);
+    const colsAt = (v) => Math.max(1, Math.floor((W + GAP) / (v + GAP)));
+    const steps = [];
+    let lastCols = -1;
+    for (let v = zMin; v <= 300; v++) {
+      const c = colsAt(v);
+      if (c !== lastCols) { steps.push(v); lastCols = c; }
+    }
+    return { zMin, W, steps, colsAt };
+  }
+
+  /* 把一個最小欄寬套到畫面上（滑桿與 Ctrl+滾輪共用）。
+     ⚠️ 改卡片大小**不會重建卡片**（只是 MasonryLayout 重寫 left/top/width），
+        所以吃不到卡片的進場動畫。改成「拖曳/縮放期間讓位移補間」——
+        只在動手的這幾百毫秒內開啟：left/top 是版面屬性，常駐 transition 的話
+        每次圖片載入完重排都會補間一次，幾百張卡片同時動會掉幀。
+        停止輸入 260ms 後就拆掉（比 transition 的 200ms 長一點，確保收完）。 */
+  applyCardWidth(v) {
+    if (!Number.isFinite(v)) return;
+    this.plugin.state.cardWidth = v;
+    if (this.motionOk()) {
+      for (const g of (this._main ? this._main.querySelectorAll('.gn-grid') : [])) g.addClass('gn-wall-resizing');
+      clearTimeout(this._resizeAnimT);
+      this._resizeAnimT = setTimeout(() => {
+        if (!this._main) return;
+        for (const g of this._main.querySelectorAll('.gn-grid')) g.removeClass('gn-wall-resizing');
+        /* 收尾再全量重排一次（保險）：動手的期間若有圖片正好載入完，
+           它的高度可能是在舊欄寬下量到的。停手後重算一次，版面一定收斂。 */
+        for (const m of (this._masonries || [])) m.scheduleLayout();
+        for (const vw of (this._virtuals || [])) vw.relayout();
+      }, 260);
+    }
+    for (const m of (this._masonries || [])) m.setMinCol(v);   // 各區瀑布流即時重排
+    /* ⚠️ 虛擬化模式（>300 張）**一定要一起通知 VirtualWall**。
+       renderVirtual() 會把該區的 masonry destroy 並從 _masonries 移除，
+       所以大資料夾裡上面那一行是在空陣列上跑 —— 漏掉這行的話只會存值，
+       畫面要等下一次整面重畫（切資料夾／按重新整理）才生效。 */
+    for (const vw of (this._virtuals || [])) vw.setMinCol(v);
+    this.plugin.saveState();
+    /* 面板若正開著（滑桿在畫面上）→ 讓它跟著走，兩邊不各說各話。 */
+    if (this._cardSizeSync) { try { this._cardSizeSync(v); } catch (e) {} }
+  }
+
+  /* Ctrl（macOS 的 ⌘ 也算）＋滾輪＝縮放卡片牆（2026-11-19）。
+     走的就是上面那份檔位表：一次換**一格**（＝一個欄數），所以手感與
+     「⋯ 更多 → 卡片大小」拖一格完全相同；存檔也寫同一個 state.cardWidth。
+
+     ⚠️ 觸控板的捏合縮放在 Chromium 裡是「帶 ctrlKey 的 wheel 事件、每次 deltaY 很小」，
+        純滾輪一格是 100。若每次事件都換一格，觸控板一捏就會從頭跳到尾，
+        所以做成「累積到門檻才走一格」。 */
+  onWallWheelZoom(e) {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    // 這面牆根本沒卡片（空資料夾／索引中）就別吃事件，讓預設捲動照走
+    if (!this._main || !this._main.querySelector('.gn-grid')) return;
+    const model = this.cardSizeModel();
+    if (model.steps.length < 2) return;   // 視窗太窄只有一種排法（與滑桿停用同理）
+    e.preventDefault();                   // 吃掉整頁縮放
+    e.stopPropagation();                  // 不要讓外層（Obsidian）再處理一次
+    const unit = e.deltaMode === 1 ? 16 : (e.deltaMode === 2 ? model.W : 1);
+    const d = (e.deltaY || 0) * unit;
+    if (!d) return;
+    this._zoomAcc = (this._zoomAcc || 0) + d;
+
+    const THRESH = 30;
+    if (Math.abs(this._zoomAcc) < THRESH) return;
+    const dir = this._zoomAcc < 0 ? 1 : -1;   // 往上滾＝放大（欄寬變大、卡片變大）
+    this._zoomAcc = 0;
+
+    const cur = this.plugin.state.cardWidth || 120;
+    // 目前值落在哪一格：取最接近的檔位（換版面／換視窗寬後舊值不一定剛好等於某個檔位）
+    let idx = 0, best = Infinity;
+    model.steps.forEach((v, i) => { const dd = Math.abs(v - cur); if (dd < best) { best = dd; idx = i; } });
+    const next = Math.min(model.steps.length - 1, Math.max(0, idx + dir));
+    if (next === idx) return;                 // 已經到頭了，不用重排
+    this.applyCardWidth(model.steps[next]);
+  }
+
   // 工具列的「⋯ 更多」面板：排序 / 卡片大小（真滑桿）/ 圓角 / 攤平 / 重新整理
   // 用自訂浮動面板而不是 Obsidian 的 Menu —— Menu 只吃「選項列」，塞不進滑桿，
   // 而且會被迫再開一層子選單。這裡全部攤平成單層。
@@ -2127,21 +2218,8 @@ class GalleryView extends ItemView {
        改法：先算出「每個欄數的第一個 minCol」當作檔位，滑桿的 value 變成**索引**，
        每一格都真的會改變畫面。保留 minCol 機制的好處（視窗變窄自動減欄）。 */
     if (!document.body.classList.contains('is-mobile')) {
-      // 編輯風索引卡有欄寬下限（縮圖 94 + 內距塞不下更窄）→ 起點跟著提高
-      const zMin = this.effectiveLayout() === 'editorial' ? GN_EDITORIAL_MIN_COL : 120;
-      const GAP = 16;   // 與 makeGrid 建 MasonryLayout 時的 gap 一致
-      /* 量「卡片牆容器」的寬度，不是 .gn-main —— MasonryLayout 量的就是 .gn-grid，
-         用 .gn-main 會多算它的左右 padding，算出來的斷點會偏掉一格。 */
-      const grid = this._main && this._main.querySelector('.gn-grid');
-      const W = (grid && grid.clientWidth) || (this._main ? this._main.clientWidth - 30 : 800);
-      const colsAt = (v) => Math.max(1, Math.floor((W + GAP) / (v + GAP)));
-
-      const steps = [];
-      let lastCols = -1;
-      for (let v = zMin; v <= 300; v++) {
-        const c = colsAt(v);
-        if (c !== lastCols) { steps.push(v); lastCols = c; }
-      }
+      /* 檔位表與 Ctrl+滾輪縮放共用（見 cardSizeModel）—— 兩邊一定落在同一格。 */
+      const { zMin, steps, colsAt } = this.cardSizeModel();
 
       const label = pop.createDiv('gn-more-label');
       label.setText(t('Card size'));
@@ -2162,34 +2240,19 @@ class GalleryView extends ItemView {
       zoom.min = '0'; zoom.max = String(Math.max(0, steps.length - 1)); zoom.step = '1';
       zoom.value = String(idx);
       if (steps.length < 2) zoom.disabled = true;   // 視窗太窄，只有一種排法
+      // Ctrl+滾輪是同一件事的另一個入口，把提示掛在滑桿上（不佔版面）
+      zoom.title = t('Ctrl + wheel zooms the wall');
       zoom.oninput = () => {
         const v = steps[Number(zoom.value)] || zMin;
-        state.cardWidth = v;
         showInfo(v);
-        /* 改卡片大小**不會重建卡片**（只是 MasonryLayout 重寫 left/top/width），
-           所以吃不到卡片的進場動畫。改成「拖曳期間讓位移補間」——
-           ⚠️ 只在拖曳的這幾百毫秒內開啟：left/top 是版面屬性，常駐 transition 的話
-              每次圖片載入完重排都會補間一次，幾百張卡片同時動會掉幀。
-              停止輸入 260ms 後就拆掉（比 transition 的 200ms 長一點，確保收完）。 */
-        if (this.motionOk()) {
-          for (const g of (this._main ? this._main.querySelectorAll('.gn-grid') : [])) g.addClass('gn-wall-resizing');
-          clearTimeout(this._resizeAnimT);
-          this._resizeAnimT = setTimeout(() => {
-            if (!this._main) return;
-            for (const g of this._main.querySelectorAll('.gn-grid')) g.removeClass('gn-wall-resizing');
-            /* 收尾再全量重排一次（保險）：拖曳期間若有圖片正好載入完，
-               它的高度可能是在舊欄寬下量到的。停手後重算一次，版面一定收斂。 */
-            for (const m of (this._masonries || [])) m.scheduleLayout();
-            for (const vw of (this._virtuals || [])) vw.relayout();
-          }, 260);
-        }
-        for (const m of (this._masonries || [])) m.setMinCol(v);   // 各區瀑布流即時重排
-        /* ⚠️ 虛擬化模式（>300 張）**一定要一起通知 VirtualWall**。
-           renderVirtual() 會把該區的 masonry destroy 並從 _masonries 移除，
-           所以大資料夾裡上面那一行是在空陣列上跑 —— 漏掉這行的話滑桿只會存值，
-           畫面要等下一次整面重畫（切資料夾／按重新整理）才生效。 */
-        for (const vw of (this._virtuals || [])) vw.setMinCol(v);
-        this.plugin.saveState();
+        this.applyCardWidth(v);   // 重排、存檔、同步（見 applyCardWidth）
+      };
+      /* Ctrl+滾輪縮放時面板可能正好開著 → 讓滑桿跟著跳（面板關閉時清掉）。 */
+      this._cardSizeSync = (v) => {
+        let i = 0, d0 = Infinity;
+        steps.forEach((s, k) => { const d = Math.abs(s - v); if (d < d0) { d0 = d; i = k; } });
+        zoom.value = String(i);
+        showInfo(v);
       };
     }
 
@@ -2296,6 +2359,7 @@ class GalleryView extends ItemView {
     //    否則整頁重畫時若剛好沿用同一顆元素，會留下永遠亮著的鈕。
     if (this._moreAnchor) { this.markAnchorOpen(this._moreAnchor, false); this._moreAnchor = null; }
     if (this._morePop) { this._morePop.remove(); this._morePop = null; }
+    this._cardSizeSync = null;   // 面板關了，Ctrl+滾輪不必再同步滑桿
   }
 
   /* 卡片區空白處右鍵 →「在此新建」（與工具列那顆＋同一個選單）。
@@ -4356,6 +4420,12 @@ class GalleryView extends ItemView {
     const splitter = split.createDiv('gn-split-handle');
     const main = split.createDiv('gn-main');
     this._split = split; this._main = main;   // 供手機「點資料夾 → 跳右欄」使用
+    /* Ctrl + 滾輪 = 縮放卡片牆（桌機，2026-11-19）。
+       綁在 .gn-main（卡片牆的捲動容器）而不是整個畫廊：滑到左樹／工具列或面板上
+       時不該縮放，那邊的滾輪有自己的用途。
+       passive:false 才叫得動 preventDefault —— 否則瀏覽器／Obsidian 會把
+       Ctrl+滾輪當「整頁縮放」，畫面會同時被放大兩次。 */
+    if (!isMobileUI) main.addEventListener('wheel', (e) => this.onWallWheelZoom(e), { passive: false });
     this._tree = tree; this._splitter = splitter;   // 供 applyTreeCollapsed() 就地更新
 
     /* （2026-08-10 移除）工具列的「展開左欄」鈕。

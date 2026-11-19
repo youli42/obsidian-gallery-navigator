@@ -134,7 +134,7 @@ const ZH_TW = {
   'Also delete {{n}} attachment(s) not referenced by any other note': '連同刪除 {{n}} 個未被其他筆記引用的附件',
   'Moved to trash: {{name}} (+{{n}} attachments)': '已移到垃圾桶：{{name}}（＋{{n}} 個附件）',
   // ── 更多面板 ──
-  'Sort': '排序', 'Tags in this folder': '本資料夾的標籤', 'Clear': '清除', 'Card size': '卡片大小',
+  'Sort': '排序', 'Tags in this folder': '本資料夾的標籤', 'Clear': '清除', 'Card size': '卡片大小', 'Ctrl + wheel zooms the wall': 'Ctrl + 滾輪可縮放卡片',
   '{{n}} columns': '{{n}} 欄',
   'Flatten: include all subfolders': '攤平：含所有子資料夾',
   // ── 資料夾操作 ──
@@ -439,7 +439,7 @@ const ZH_CN = {
   'Also delete {{n}} attachment(s) not referenced by any other note': '同时删除 {{n}} 个未被其他笔记引用的附件',
   'Moved to trash: {{name}} (+{{n}} attachments)': '已移入回收站：{{name}}（另含 {{n}} 个附件）',
   // ── 更多面板 ──
-  'Sort': '排序', 'Tags in this folder': '当前文件夹的标签', 'Clear': '清除', 'Card size': '卡片大小',
+  'Sort': '排序', 'Tags in this folder': '当前文件夹的标签', 'Clear': '清除', 'Card size': '卡片大小', 'Ctrl + wheel zooms the wall': 'Ctrl + 滚轮可缩放卡片',
   '{{n}} columns': '{{n}} 列',
   // 工具列「更多」的手机列数走动态拼接 key（t(n + ' column(s)')），繁体字典没有，简体补齐
   '1 column': '1 列', '2 columns': '2 列', '3 columns': '3 列',
