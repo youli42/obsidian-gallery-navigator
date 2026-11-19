@@ -369,6 +369,7 @@ const ZH_TW = {
     '依 ## 標題分組；側欄顯示同組的其他圖片。留空＝關閉側欄',
   'Number of related images in the sidebar': '側欄顯示的相關圖片數量',
   'Related': '相關圖片',
+  'Could not locate the link in this note': '找不到這則筆記裡的這條連結',
   'Could not copy this image': '無法複製這張圖片',
   'Preview hovered or selected image': '預覽懸停或選取的圖片',
 };
@@ -705,6 +706,7 @@ const ZH_CN = {
 
   /* ── 2026-11-19：Image Peek 之前寫死的英文字串，改用 t() ── */
   'Related': '相关图片',
+  'Could not locate the link in this note': '找不到这篇笔记里的这条链接',
   'Could not copy this image': '无法复制这张图片',
   'Preview hovered or selected image': '预览悬停或选中的图片',
 };

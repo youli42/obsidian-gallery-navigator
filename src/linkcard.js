@@ -1127,29 +1127,46 @@ async function applyCleanToSource(url, cleaned, opts) {
 
   // ① Live Preview：直接改 CM 文件
   if (opts.lpView && opts.lpContainer) {
+    let done = false;
     try {
       const view = opts.lpView;
       const pos = view.posAtDOM(opts.lpContainer);
       const line = view.state.doc.lineAt(pos);
-      const next = line.text.split(url).join(cleaned);
-      if (next !== line.text) {
-        view.dispatch({ changes: { from: line.from, to: line.to, insert: next } });
-        new Notice(t('Cleaned {{n}} link(s)', { n: 1 }));
-        return;
+      // 定位到的行必須真的含這條網址，否則改下去就是改錯地方
+      if (line.text.includes(url)) {
+        const next = line.text.split(url).join(cleaned);
+        if (next !== line.text) {
+          view.dispatch({ changes: { from: line.from, to: line.to, insert: next } });
+          done = true;
+        }
       }
-    } catch (e) { /* 落到檔案改寫 */ }
+    } catch (e) { /* 定位失敗 → 下面直接放棄 */ }
+    if (done) { new Notice(t('Cleaned {{n}} link(s)', { n: 1 })); return; }
+    /* ⚠️ 定位失敗就停在這裡，**不要**落到下面的檔案改寫：
+       Live Preview 的 opts 沒有 sourcePath（見 mountCard 呼叫端），舊版會退回
+       getActiveFile()，於是拿「當下開著的那篇」當目標、再用 split/join 全文替換
+       —— 改錯筆記，連程式碼區塊裡的同一條網址也一起改。 */
+    new Notice(t('Could not locate the link in this note'));
+    return;
   }
 
-  // ② 閱讀模式 / 其他：改寫來源檔案
+  // ② 閱讀模式 / Canvas：改寫來源檔案（沒有 sourcePath 就不猜目標）
   const app = plugin.app;
-  const path = opts.sourcePath || app.workspace.getActiveFile()?.path;
-  const file = path ? app.vault.getAbstractFileByPath(path) : null;
+  const file = opts.sourcePath ? app.vault.getAbstractFileByPath(opts.sourcePath) : null;
   if (!file) { new Notice(t('Could not locate the source note')); return; }
 
   try {
-    const rewrite = (data) => data.split(url).join(cleaned);
+    /* 只換第一處：全文 split/join 會連同筆記裡其他相同網址（含程式碼區塊）一起改掉。 */
+    let found = false;
+    const rewrite = (data) => {
+      const i = data.indexOf(url);
+      if (i < 0) return data;
+      found = true;
+      return data.slice(0, i) + cleaned + data.slice(i + url.length);
+    };
     if (app.vault.process) await app.vault.process(file, rewrite);
     else await app.vault.modify(file, rewrite(await app.vault.read(file)));
+    if (!found) { new Notice(t('Could not locate the link in this note')); return; }
     new Notice(t('Cleaned {{n}} link(s)', { n: 1 }));
   } catch (e) {
     new Notice(t('Clean failed: {{msg}}', { msg: e.message }));
