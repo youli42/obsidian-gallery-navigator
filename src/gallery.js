@@ -4148,19 +4148,26 @@ class GalleryView extends ItemView {
     if (nh) nh.toggleClass('gn-cluster-open', on);
   }
 
-  /* 桌機：常駐搜尋框（2026-11-18）。
-     放在 .gn-bar（不在 .gn-main）→ rerenderMain 清不到輸入框，打字不失焦。
-     搜尋時不再把整條工具列變形；樹也保留，可以邊搜邊換資料夾。 */
-  buildTopSearch(parent) {
-    const wrap = parent.createDiv('gn-top-search');
-    setIcon(wrap.createDiv('gn-top-search-ic'), 'search');
-    const input = wrap.createEl('input', { type: 'search', cls: 'gn-top-search-input' });
+  /* 搜尋框：桌機的常駐工具列框與手機的搜尋列共用同一個實作（2026-11-19 合併）。
+     以前是兩份幾乎相同的 copy，連「去抖回来已经换页」这种 bug 都各有一份。
+     opts.bar       = true → 工具列樣式（放大鏡圖示、清除鈕有開關態、Enter 立即執行）
+     opts.onClose   = 關閉鈕行為（手機：收掉整條搜尋列；不給 = 清空後留在原地）
+     opts.autofocus = 建立後聚焦（手機搜尋列）
+     ⚠️ 一定掛在 .gn-main 外面 —— rerenderMain() 會 empty() 掉 gn-main，
+        掛在裡面每次篩選／排序都會重建輸入框 → 打字打到一半失焦。 */
+  buildSearchBox(host, opts) {
+    const o = opts || {};
+    const bar = !!o.bar;
+    const wrap = host.createDiv(bar ? 'gn-top-search' : 'gn-search-row');
+    if (bar) setIcon(wrap.createDiv('gn-top-search-ic'), 'search');
+    const input = wrap.createEl('input', { type: 'search', cls: bar ? 'gn-top-search-input' : 'gn-search-input' });
     input.placeholder = t('Search full text…');
     input.value = this._searchQ || '';
-    const clear = wrap.createDiv('gn-top-search-clear');
+
+    const clear = wrap.createDiv(bar ? 'gn-top-search-clear' : 'gn-search-clear');
     setIcon(clear, 'x');
-    clear.setAttr('aria-label', t('Clear search'));
-    const syncClear = () => clear.toggleClass('gn-top-search-clear-on', !!this._searchQ);
+    clear.setAttr(bar ? 'aria-label' : 'title', t(bar ? 'Clear search' : 'Close search'));
+    const syncClear = () => { if (bar) clear.toggleClass('gn-top-search-clear-on', !!this._searchQ); };
     syncClear();
 
     let timer = null;
@@ -4185,59 +4192,25 @@ class GalleryView extends ItemView {
       syncClear();
     };
     const reset = () => {
-      input.value = '';
       clearTimeout(timer);
       this._searchGen++;                        // 作廢還在等索引的那一代
-      const changed = !!this._searchQ || this._searchOn;
+      const wasOn = !!this._searchQ || this._searchOn;
       this._searchQ = '';
       this._searchOn = false;
       if (this._syncNewBtn) this._syncNewBtn();
-      if (changed) this.rerenderMain();
+      if (o.onClose) { o.onClose(); return; }   // 手機：整條搜尋列收掉，畫面交給 onClose 重畫
+      input.value = '';
+      if (wasOn) this.rerenderMain();
       syncClear();
       input.focus();
     };
     input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 150); });
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && !isImeKey(e)) { e.stopPropagation(); reset(); }
-      else if (e.key === 'Enter') { e.preventDefault(); clearTimeout(timer); run(); }
+      else if (bar && e.key === 'Enter') { e.preventDefault(); clearTimeout(timer); run(); }
     });
     clear.onclick = (e) => { e.stopPropagation(); reset(); };
-  }
-
-  /* 搜尋輸入列。2026-08-10 抽成方法：桌機要掛在右欄（.gn-maincol）、手機掛在 root，
-     位置隨平台不同，但**兩邊都必須在 .gn-main 外面** —— rerenderMain() 會 empty() 掉
-     gn-main，放進去的話每次篩選／排序都會重建輸入框 → 打字打到一半失焦。
-     （舊註解還寫「gn-main 有頂部淡出遮罩」，那是過期的：全份 CSS 已無任何 mask 規則。） */
-  buildSearchRow(host) {
-    const srow = host.createDiv('gn-search-row');
-    const sinput = srow.createEl('input', { type: 'search', cls: 'gn-search-input' });
-    sinput.placeholder = t('Search full text…');
-    sinput.value = this._searchQ || '';
-
-    const sclose = srow.createDiv('gn-search-clear');
-    setIcon(sclose, 'x');
-    sclose.setAttr('title', t('Close search'));
-    const close = () => { this._searchOn = false; this._searchQ = ''; this.render(); };
-    sclose.onclick = close;
-
-    let timer = null;
-    const run = async () => {
-      if (!sinput.isConnected || this._closed) return;
-      const q = sinput.value.trim();
-      this._searchQ = q;
-      const gen = ++this._searchGen;
-      if (q && !this.plugin.search.ready) {
-        this.rerenderMain();                      // 先顯示「建立索引中…」
-        await this.plugin.search.ensureReady();
-        if (gen !== this._searchGen || !sinput.isConnected || this._closed) return;
-        if (sinput.value.trim() !== q) return;    // 建索引期間又打了字 → 交給後面那次
-      }
-      if (gen !== this._searchGen || !sinput.isConnected || this._closed) return;
-      this.rerenderMain();
-    };
-    sinput.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 150); });
-    sinput.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !isImeKey(e)) close(); });
-    setTimeout(() => sinput.focus(), 0);
+    if (o.autofocus) setTimeout(() => input.focus(), 0);
   }
 
   /* 左樹名稱過濾（2026-11-18）：回傳 {visible, open}，沒有查詢時回傳 null。
@@ -4334,7 +4307,10 @@ class GalleryView extends ItemView {
     this._barTitle = null;
     if (!isMobileUI) bar.addClass('gn-topbar');
     /* 手機搜尋列必須在 .gn-main 外面，且 DOM 順序固定 [bar][searchRow][split]。 */
-    if (isMobileUI && this._searchOn) this.buildSearchRow(root);
+    if (isMobileUI && this._searchOn) {
+      // 手機搜尋列：關閉鈕＝整條收掉後重畫（桌機的清除鈕只清空、留在原地）
+      this.buildSearchBox(root, { autofocus: true, onClose: () => this.render() });
+    }
 
     /* 桌機的標籤篩選面板放在工具列下方、卡片捲動區外 → 開著時永遠看得到。 */
     this._tagbarHost = isMobileUI ? null : root.createDiv('gn-top-tagbar-host');
@@ -4419,7 +4395,7 @@ class GalleryView extends ItemView {
        手機那顆本來就被 .is-mobile .gn-collapse-btn { display:none } 藏著 —— 兩邊都用不到了。 */
 
     /* ===== 搜尋 =====
-       桌機：搜尋框常駐在工具列右組（見 buildTopSearch），打字即時篩選，不再把整條工具列變形。
+       桌機：搜尋框常駐在工具列右組（見 buildSearchBox），打字即時篩選，不再把整條工具列變形。
        手機：維持原況，這顆開 GnSearchModal 懸浮搜尋。 */
     if (isMobileUI) {
       const searchBtn = btn.search = this.mkBarBtn(tray, 'search', t('Search notes (full-text popup)'));
@@ -4580,7 +4556,7 @@ class GalleryView extends ItemView {
       topRight.appendChild(topCtx);
       topRight.appendChild(tagBtn);
       this.syncTopTagButton();
-      this.buildTopSearch(topRight);
+      this.buildSearchBox(topRight, { bar: true });
       for (const k of ['sort', 'more', 'new']) if (btn[k]) topRight.appendChild(btn[k]);
     }
 
