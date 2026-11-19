@@ -338,7 +338,41 @@ const ZH_TW = {
     '網址在貼進筆記的當下就已經去掉追蹤參數，不必事後再淨化。從網頁複製的排版內容不受影響（仍照常轉成 Markdown）。',
   'Parameters to always keep': '永遠保留的參數',
   'Comma separated. Never removed, even if blacklisted. Wins over everything else.': '用逗號分隔。列在這裡的參數絕不刪除，優先權最高。',
+  /* ── 補齊（2026-11-19）：ZH_CN 寫得比較完整時漏收的鍵 ──
+     這些字串在繁體介面會直接顯示英文（t() 查不到就回原文）。多數是 Image Peek
+     與 Link Cards 的設定項；'1 column'/'2 columns'/'3 columns' 是工具列「更多」
+     面板動態拼出來的 key（t(n + ' column(s)')）。 */
+  '1 column': '1 欄', '2 columns': '2 欄', '3 columns': '3 欄',
+  'Link cards: moved {{n}} images from data.json to images/': '連結卡片：已將 {{n}} 張圖片從 data.json 移到 images/',
+  'Insert post text when pasting Threads / Instagram links': '貼上 Threads / Instagram 連結時插入貼文文字',
+  'When off, only the bare link is kept': '關閉時只保留裸連結',
+  'Keep native YouTube embeds on Canvas': '在 Canvas 上保留 YouTube 原生嵌入',
+  'On = playable iframe; off = link card. Reopen the Canvas after switching': '開＝可播放的 iframe；關＝連結卡片。切換後請重新開啟 Canvas',
+  'Takes effect after reopening the Canvas': '重新開啟 Canvas 後生效',
+  'Image': '圖片',
+  'PNG conversion failed': 'PNG 轉換失敗',
+  'Image not loaded yet': '圖片尚未載入完成',
+  'Click an image to open the preview': '點一下圖片開啟預覽',
+  'Desktop: double-click (single click keeps native behavior). Mobile: single tap in notes, double tap on Canvas':
+    '桌機：雙擊（單擊保留原生行為）。手機：在筆記裡單擊、在 Canvas 上雙擊',
+  'Press Space to open the preview': '按空白鍵開啟預覽',
+  'Press Space while hovering an image (or with an image node selected on Canvas)':
+    '滑鼠停在圖片上時按空白鍵（或在 Canvas 上選取圖片節點後按空白鍵）',
+  'Show action buttons': '顯示操作按鈕',
+  'Copy / open-in-system buttons in the preview window': '預覽視窗裡的「複製 / 在系統中顯示」按鈕',
+  'Background blur': '背景模糊',
+  'Turn off on low-end devices for better performance': '低階裝置建議關掉，效能較好',
+  'Excluded images (CSS selectors)': '排除的圖片（CSS 選擇器）',
+  'Images matching these selectors will not trigger the preview': '符合這些選擇器的圖片不會觸發預覽',
+  'MOC note for related images': '相關圖片的 MOC 筆記',
+  'Grouped by ## headings; the sidebar shows other images in the same group. Empty = sidebar off':
+    '依 ## 標題分組；側欄顯示同組的其他圖片。留空＝關閉側欄',
+  'Number of related images in the sidebar': '側欄顯示的相關圖片數量',
+  'Related': '相關圖片',
+  'Could not copy this image': '無法複製這張圖片',
+  'Preview hovered or selected image': '預覽懸停或選取的圖片',
 };
+
 
 /* ══ ZH_CN —— 简体中文（2026-11 加入）══
    按大陆通用术语翻译，不是繁体的逐字转换：
@@ -347,9 +381,10 @@ const ZH_TW = {
      捲動→滚动 / 記憶體→内存 / 解析度→分辨率 / 連結→链接 / 標籤→标签 /
      選取範圍→选区 / 淨化→净化 / 欄→列 / 最愛→收藏 / 釘選→置顶 /
      全域→全局 / 手機→移动端 / 桌機→桌面端 / 攤平→扁平化 / 拖曳→拖拽。
-   覆盖 ZH_TW 全部 key，另补上 ZH_TW 漏收的 22 条（Image Peek / Link Cards
-   设定），以及工具列「更多」面板动态拼接的 '1 column' / '2 columns' /
-   '3 columns'（繁体字典同样没有，这边一并补齐）。
+   两份字典的 key 集合必须完全一致（tests/i18n.test.js 会检查，缺一条就报错）。
+   ZH_TW 当初漏收的 Image Peek / Link Cards 设置项，以及工具列「更多」动态拼接的
+   '1 column' / '2 columns' / '3 columns'，已于 2026-11-19 补齐；以后新增字串时
+   两边都要加，不要只补其中一边。
    key 的拼写与 ZH_TW 逐字一致——带引号转义的地方照抄，改了 key 就查不到了。 */
 const ZH_CN = {
   // ── 指令 ──
@@ -667,6 +702,11 @@ const ZH_CN = {
   'Grouped by ## headings; the sidebar shows other images in the same group. Empty = sidebar off':
     '按 ## 标题分组；侧栏显示同组的其他图片。留空＝关闭侧栏',
   'Number of related images in the sidebar': '侧栏中相关图片的数量',
+
+  /* ── 2026-11-19：Image Peek 之前寫死的英文字串，改用 t() ── */
+  'Related': '相关图片',
+  'Could not copy this image': '无法复制这张图片',
+  'Preview hovered or selected image': '预览悬停或选中的图片',
 };
 
 /* 正規化之後只剩兩個正規 key：'zh-TW' / 'zh-CN'（大小寫、底線、裸 'zh'
@@ -684,4 +724,6 @@ function t(key, vars) {
   return s;
 }
 
-module.exports = { t, setLang, currentLang, isZh };
+/* DICTS 只給 tests/i18n.test.js 用（檢查兩份字典的 key 是否一致）。
+   執行期一律走 t()，不要直接讀字典。 */
+module.exports = { t, setLang, currentLang, isZh, DICTS: LANGS };

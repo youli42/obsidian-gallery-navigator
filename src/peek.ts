@@ -10,6 +10,7 @@ import {
 	Scope,
 	Setting,
 	setIcon,
+	TextComponent,
 } from "obsidian";
 import { t } from "./i18n.js";
 
@@ -258,7 +259,7 @@ export class PeekModule {
 
 		this.plugin.addCommand({
 			id: "peek-image",
-			name: "Preview hovered or selected image",
+			name: t("Preview hovered or selected image"),
 			callback: () => {
 				if (!this.enabled) return;
 				const img = this.hoveredImg ?? this.focusedCanvasImg();
@@ -643,7 +644,7 @@ class PeekOverlay {
 		// 右側欄：相關圖片
 		this.sidebarEl = mainEl.createDiv({ cls: "qp-sidebar" });
 		const relTitle = this.sidebarEl.createDiv({ cls: "qp-sidebar-title" });
-		relTitle.setText("Related");
+		relTitle.setText(t("Related"));
 		this.relatedEl = this.sidebarEl.createDiv({ cls: "qp-related-grid" });
 		this.sidebarEl.style.display = "none"; // 預設隱藏，有相關圖才顯示
 
@@ -755,10 +756,10 @@ class PeekOverlay {
 			await navigator.clipboard.write([
 				new ClipboardItem({ "image/png": blob }),
 			]);
-			new Notice("Image copied");
+			new Notice(t("Image copied"));
 		} catch (e) {
 			console.error("Image Peek copy failed", e);
-			new Notice("Could not copy this image");
+			new Notice(t("Could not copy this image"));
 		}
 	}
 
@@ -1286,12 +1287,12 @@ export function renderPeekSettings(containerEl: HTMLElement, plugin: any) {
 	new Setting(containerEl)
 		.setName(t('Excluded images (CSS selectors)'))
 		.setDesc(t('Images matching these selectors will not trigger the preview'))
-		.addText((t: any) => t.setValue(s.excludeSelectors || '').onChange((v: string) => { s.excludeSelectors = v; save(); }));
+		.addText((tc: TextComponent) => tc.setValue(s.excludeSelectors || '').onChange((v: string) => { s.excludeSelectors = v; save(); }));
 
 	new Setting(containerEl)
 		.setName(t('MOC note for related images'))
 		.setDesc(t('Grouped by ## headings; the sidebar shows other images in the same group. Empty = sidebar off'))
-		.addText((t: any) => t.setValue(s.mocPath || '').onChange((v: string) => { s.mocPath = v; save(); }));
+		.addText((tc: TextComponent) => tc.setValue(s.mocPath || '').onChange((v: string) => { s.mocPath = v; save(); }));
 
 	new Setting(containerEl)
 		.setName(t('Number of related images in the sidebar'))
