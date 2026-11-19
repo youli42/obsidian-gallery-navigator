@@ -7703,6 +7703,13 @@ class GalleryPlugin extends Plugin {
         const view = leaf.view;
         if (view instanceof GalleryView) view.remapViewPaths(oldPath, f.path);
       });
+      /* 非 md 附件的「標籤」也跟著 assetTags 一起搬到新路徑了。
+         ⚠️ 搜索索引的 rename 監聽器註冊得比這條更早，它執行時標籤還掛在舊路徑，
+         indexable() 會回 false → 只立了墓碑、沒有重建 → 帶標籤的附件改名後
+         直接從搜索消失。搬到這裡補一次索引（此刻 assetTags 已是新路徑）。 */
+      if (this.search && f.extension !== 'md' && f.extension !== 'pdf') {
+        this.search.onFileChanged(f);
+      }
     }));
 
     /* 啟動後排一次閒置清掃（只做一次，不常駐）：
