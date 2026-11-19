@@ -7722,6 +7722,11 @@ class GalleryPlugin extends Plugin {
           if (!alive) return;
           await this.pruneOgCache();
           if (alive && this.thumbs) await this.thumbs.prune();
+          /* 封面快取也會一直長大（og 圖、影片首幀、Excalidraw 縮圖都存這裡），
+             以前 prune 只有設定頁手動觸發 → 來源被外部刪掉或索引損壞時，孤兒檔
+             會永久留在磁碟上吃同步額度。跟上面兩份一起在閒置時掃一次（prune
+             自己有「索引沒載入成功就什麼都不做」的防線）。 */
+          if (alive && this.coverCache) await this.coverCache.prune();
         } catch (e) {}
       });
     });
