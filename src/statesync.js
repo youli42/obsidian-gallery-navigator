@@ -27,6 +27,9 @@ const LOCAL_KEYS = [
   'lastPath', 'treeScrollTop', 'treeWidth', 'treeCollapsed', 'cardWidth', 'mobileCols',
   'expandedFolders', 'expandedTags', 'leftMode', 'activeTag', 'tagDockOpen', 'favCollapsed',
   'videoCoverMaxMB',
+  /* 封面快取的磁碟預算是「這台裝置」的事：桌機 200MB、手機 50MB 的預設值本來就不同，
+     同步過去只會讓桌機的設定把手機的保守值蓋掉（與 videoCoverMaxMB 同一個道理）。 */
+  'coverCacheMB',
 ];
 const LOCAL_SET = new Set(LOCAL_KEYS);
 
