@@ -71,6 +71,56 @@ function splitState(state) {
   return { shared, local };
 }
 
+/* 陣列欄位的元素識別：favorites 是 {type,path} 物件，其餘（hiddenFolders /
+   pinnedCards / noPreviewFolders…）都是字串路徑。用同一套 key 才能做集合比較。 */
+function arrayKeyOf(field, v) {
+  if (field === 'favorites' && v && typeof v === 'object') {
+    return String(v.type || '') + '|' + String(v.path || '');
+  }
+  return String(v);
+}
+
+/* 陣列型欄位做集合式合併（2026-11-19）。
+   原本是整值 last-writer-wins：兩台各釘選一張卡，後存檔的那台會把對方的釘選整段蓋掉。
+   規則是「誰改了誰算數」：
+     • 只有一邊改 → 那一邊的結果
+     • 兩邊都改 → 只要還有一邊留著就留著（單邊刪除生效，雙邊刪除才真的消失）
+     • 都沒改 → 沿用 base／本機
+   順序：本機的順序優先，遠端獨有的項目接在後面。 */
+function mergeSetArray(field, base, local, remote) {
+  const toMap = (arr) => {
+    const m = new Map();
+    for (const v of (Array.isArray(arr) ? arr : [])) m.set(arrayKeyOf(field, v), v);
+    return m;
+  };
+  const b = toMap(base), l = toMap(local), r = toMap(remote);
+  const order = [];
+  const seen = new Set();
+  for (const v of (Array.isArray(local) ? local : [])) {
+    const k = arrayKeyOf(field, v);
+    if (!seen.has(k)) { seen.add(k); order.push(k); }
+  }
+  for (const v of (Array.isArray(remote) ? remote : [])) {
+    const k = arrayKeyOf(field, v);
+    if (!seen.has(k)) { seen.add(k); order.push(k); }
+  }
+  const out = [];
+  for (const k of order) {
+    const inB = b.has(k), inL = l.has(k), inR = r.has(k);
+    const localChanged = inL !== inB;
+    const remoteChanged = inR !== inB;
+    let keep;
+    if (localChanged && remoteChanged) keep = inL || inR;
+    else if (localChanged) keep = inL;
+    else if (remoteChanged) keep = inR;
+    else keep = inL;
+    if (!keep) continue;
+    // 顯示用本機那一份（欄位內容可能比 key 豐富，例如 favorites 的圖示/顏色）
+    out.push(l.has(k) ? l.get(k) : (b.has(k) ? b.get(k) : r.get(k)));
+  }
+  return out;
+}
+
 /* 物件型欄位逐個子鍵合併（folderOrder 的每個父層、folderColors 的每個資料夾……）。
    這一層要處理「刪除」：另一台把某個資料夾的顏色拿掉，這邊也要跟著拿掉。 */
 function mergeObject(base, local, remote) {
@@ -160,6 +210,10 @@ function mergeShared(base, local, remote) {
       const keepLocal = remoteEmpty && baseEmpty &&
         isPlainObject(local[k]) && Object.keys(local[k]).length;
       merged[k] = keepLocal ? clone(local[k]) : mergeTagMap(b || {}, local[k], remote[k]);
+    } else if (Array.isArray(local[k]) && Array.isArray(remote[k]) && (b === undefined || Array.isArray(b))) {
+      /* 陣列型欄位（hiddenFolders / pinnedCards / favorites / noPreviewFolders…）
+         以前是整值 last-writer-wins：兩台各加一項時，後存檔的那台把對方整段蓋掉。 */
+      merged[k] = mergeSetArray(k, b || [], local[k], remote[k]);
     } else if (isPlainObject(local[k]) && isPlainObject(remote[k]) && (b === undefined || isPlainObject(b))) {
       merged[k] = mergeObject(b || {}, local[k], remote[k]);
     } else {
@@ -170,4 +224,4 @@ function mergeShared(base, local, remote) {
   return { merged: out, fromRemote: !deepEqual(out, local), needsWrite: !deepEqual(out, remote) };
 }
 
-module.exports = { LOCAL_KEYS, splitState, mergeShared, deepEqual, clone, isPlainObject };
+module.exports = { LOCAL_KEYS, splitState, mergeShared, mergeSetArray, deepEqual, clone, isPlainObject };

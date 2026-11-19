@@ -70,7 +70,7 @@ const ok = (name) => { console.log('  ✓ ' + name); n++; };
   ok('本機的刪除不會被舊檔還原');
 }
 
-// 情境 6：陣列型欄位（隱藏清單、最愛）整個比
+// 情境 6：陣列型欄位（隱藏清單、最愛）各自沒動的那邊採用對方的（集合合併見情境 15–17）
 {
   const base = { hiddenFolders: ['x'], favorites: [{ type: 'folder', path: 'a' }] };
   const local = { hiddenFolders: ['x'], favorites: [{ type: 'folder', path: 'a' }, { type: 'folder', path: 'b' }] };
@@ -161,6 +161,44 @@ const ok = (name) => { console.log('  ✓ ' + name); n++; };
   const m = mergeShared(base, local, disk);
   assert.deepStrictEqual(m.merged.assetTags, {});
   ok('assetTags：另一台清空後不會被本機復活');
+}
+
+
+// 情境 15：兩台各釘選一張不同的卡 → 兩邊都留著（原本會互相覆蓋）
+{
+  const base = { pinnedCards: ['a.md'] };
+  const local = { pinnedCards: ['a.md', 'b.md'] };
+  const disk = { pinnedCards: ['a.md', 'c.md'] };
+  const m = mergeShared(base, local, disk);
+  assert.deepStrictEqual(m.merged.pinnedCards, ['a.md', 'b.md', 'c.md']);
+  assert.ok(m.fromRemote && m.needsWrite);
+  ok('陣列欄位：兩台各加不同項 → 集合合併');
+}
+
+// 情境 16：單邊移除生效，雙邊移除才真的消失
+{
+  const base = { hiddenFolders: ['a', 'b'], noPreviewFolders: ['x'], pinnedCards: ['p.md', 'q.md'] };
+  const local = { hiddenFolders: ['a'], noPreviewFolders: [], pinnedCards: ['p.md'] };
+  const disk = { hiddenFolders: ['a', 'b', 'c'], noPreviewFolders: ['x'], pinnedCards: ['p.md', 'q.md'] };
+  const m = mergeShared(base, local, disk);
+  assert.deepStrictEqual(m.merged.hiddenFolders, ['a', 'c']);
+  assert.deepStrictEqual(m.merged.noPreviewFolders, []);
+  assert.deepStrictEqual(m.merged.pinnedCards, ['p.md']);
+  ok('陣列欄位：單邊移除生效、雙邊移除才消失');
+}
+
+// 情境 17：favorites 是 {type,path} 物件，靠 type+path 認同一筆
+{
+  const base = { favorites: [{ type: 'folder', path: 'a' }] };
+  const local = { favorites: [{ type: 'folder', path: 'a' }, { type: 'note', path: 'a' }] };
+  const disk = { favorites: [{ type: 'folder', path: 'a' }, { type: 'folder', path: 'b' }] };
+  const m = mergeShared(base, local, disk);
+  assert.deepStrictEqual(m.merged.favorites, [
+    { type: 'folder', path: 'a' },
+    { type: 'note', path: 'a' },
+    { type: 'folder', path: 'b' },
+  ]);
+  ok('陣列欄位：favorites 依 type+path 集合合併');
 }
 
 // （data.json 是個人資料、不進 repo；不存在就略過這一項）
