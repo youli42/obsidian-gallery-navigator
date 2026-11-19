@@ -4984,6 +4984,11 @@ class GalleryView extends ItemView {
     const main = this._main;
     if (!main || !main.isConnected) return;
     const target = main.querySelector('.gn-grid') || main;
+    /* 同時只留一個 settle 迴圈：新的（例如「定位到某張卡」）要蓋掉舊的
+       （例如「還原捲動位置」）。兩者都在寫 scrollTop，同時跑的話後喊的不一定贏，
+       舊迴圈會一直把畫面拉回舊位置 —— 外面看到的就是「快速連開兩則筆記，
+       偶爾停在上一則」。 */
+    if (this._settleStop) { try { this._settleStop(); } catch (e) {} }
     let done = false, ro = null, timer = 0;
     const stop = () => {
       if (done) return;
@@ -4992,7 +4997,9 @@ class GalleryView extends ItemView {
       if (timer) { clearTimeout(timer); timer = 0; }
       main.removeEventListener('wheel', stop);
       main.removeEventListener('touchstart', stop);
+      if (this._settleStop === stop) this._settleStop = null;
     };
+    this._settleStop = stop;
     const tick = () => {
       if (done) return;
       if (this._main !== main || !main.isConnected) { stop(); return; }
