@@ -1442,6 +1442,11 @@ class GalleryView extends ItemView {
           後跑的就永遠看不到「該失效」。每個快取記下自己算的時候是第幾代即可。 */
     this._tagGen = 0;
     this._folderTagsCache = null;
+    /* 搜尋「世代」：每次真的要用新查詢重畫就 +1。去抖計時器與 ensureReady()
+       都會跨越 await，回來時世界可能已經變了（換了資料夾、關了分頁、使用者
+       又打了字）—— 回來先比對世代，過期就整段放棄。 */
+    this._searchGen = 0;
+    this._closed = false;      // onClose 之後為 true：async 續段一律不再碰 DOM
   }
 
   getViewType() { return VIEW_TYPE; }
@@ -1472,6 +1477,7 @@ class GalleryView extends ItemView {
   }
 
   async onOpen() {
+    this._closed = false;   // 同一個實例可能被重新打開（Obsidian 會重用 leaf 的 view）
     /* 同 syncToFile / refreshViews：寬度 0 時建出來的牆沒有排版（見 syncToFile 的說明）。
        開啟 Obsidian 時若畫廊收在側欄，這裡就會是 0 —— 先記旗標，等 onResize 再畫。 */
     if (this.contentEl && this.contentEl.clientWidth > 0) {
@@ -1527,6 +1533,9 @@ class GalleryView extends ItemView {
   }
 
   async onClose() {
+    /* 標記「這個實例已經關了」：搜尋/縮圖那些 async 續段回來時要先看它，
+       否則會對已卸載的 DOM 續做（_main 仍指向舊節點）。onOpen 會再清掉。 */
+    this._closed = true;
     // gn-leaf 掛在外層的 .workspace-leaf-content 上（不屬於 contentEl，empty() 清不到）
     // → 關閉時自己收回來，避免這個葉面板被別的 view 重用時殘留樣式
     if (this.contentEl && this.contentEl.parentElement) this.contentEl.parentElement.removeClass('gn-leaf');
@@ -4155,24 +4164,30 @@ class GalleryView extends ItemView {
     syncClear();
 
     let timer = null;
+    // 過期判定：世代變了（又打了字／被清空）、輸入框被重建、分頁已關
+    const stale = (gen) => gen !== this._searchGen || !input.isConnected || this._closed;
     const run = async () => {
+      if (!input.isConnected || this._closed) return;
       const q = input.value.trim();
       const changed = q !== this._searchQ || !!q !== this._searchOn;
       this._searchQ = q;
       this._searchOn = !!q;
       if (this._syncNewBtn) this._syncNewBtn();
       if (!changed) return;
+      const gen = ++this._searchGen;
       if (q && !this.plugin.search.ready) {
         this.rerenderMain();                    // 先顯示「建立索引中…」
         await this.plugin.search.ensureReady();
-        if (input.value.trim() !== q) return;   // 建索引期間又打了字 → 交給後面那次
+        if (stale(gen) || input.value.trim() !== q) return;   // 建索引期間又打了字 → 交給後面那次
       }
+      if (stale(gen)) return;
       this.rerenderMain();
       syncClear();
     };
     const reset = () => {
       input.value = '';
       clearTimeout(timer);
+      this._searchGen++;                        // 作廢還在等索引的那一代
       const changed = !!this._searchQ || this._searchOn;
       this._searchQ = '';
       this._searchOn = false;
@@ -4207,13 +4222,17 @@ class GalleryView extends ItemView {
 
     let timer = null;
     const run = async () => {
+      if (!sinput.isConnected || this._closed) return;
       const q = sinput.value.trim();
       this._searchQ = q;
+      const gen = ++this._searchGen;
       if (q && !this.plugin.search.ready) {
         this.rerenderMain();                      // 先顯示「建立索引中…」
         await this.plugin.search.ensureReady();
+        if (gen !== this._searchGen || !sinput.isConnected || this._closed) return;
         if (sinput.value.trim() !== q) return;    // 建索引期間又打了字 → 交給後面那次
       }
+      if (gen !== this._searchGen || !sinput.isConnected || this._closed) return;
       this.rerenderMain();
     };
     sinput.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 150); });
