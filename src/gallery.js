@@ -5216,11 +5216,12 @@ class GalleryView extends ItemView {
     const idx = this.buildTagIndex();
     const files = [...(idx.map.get(oldPath) || [])];
     let changed = 0;
+    const touchedAssets = [];
     for (const p of files) {
       const f = asFile(this.app, p);
       if (!(f instanceof TFile)) continue;
       if (f.extension !== 'md') {
-        if (this.assetTagsRename(f, oldPath, newPath)) changed++;
+        if (this.assetTagsRename(f, oldPath, newPath)) { changed++; touchedAssets.push(f); }
         continue;
       }
       try {
@@ -5245,6 +5246,11 @@ class GalleryView extends ItemView {
     const body = await this.renameTagInBody(oldPath, newPath, files);
     changed += body.changed;
     if (changed) { this.plugin.saveState(); this.invalidateTagIndex(); }
+    /* 非 md 附件的標籤只存在 state.assetTags，但搜索索引裡也存了它們的標籤詞。
+       不重建的話：新標籤搜不到、舊標籤還搜得到（addTagToFile 有做，這裡漏了）。 */
+    if (touchedAssets.length && this.plugin.search) {
+      for (const f of touchedAssets) this.plugin.search.onFileChanged(f);
+    }
 
     if (!silent) {
       new Notice(t('Renamed #{{old}} → #{{new}} in {{n}} file(s)', { old: oldPath, new: newPath, n: changed }));
@@ -5309,11 +5315,12 @@ class GalleryView extends ItemView {
     const idx = this.buildTagIndex();
     const files = [...(idx.map.get(tagPath) || [])];
     let changed = 0;
+    const touchedAssets = [];
     for (const p of files) {
       const f = asFile(this.app, p);
       if (!(f instanceof TFile)) continue;
       if (f.extension !== 'md') {
-        if (this.assetTagsDelete(f, tagPath)) changed++;
+        if (this.assetTagsDelete(f, tagPath)) { changed++; touchedAssets.push(f); }
         continue;
       }
       try {
@@ -5331,6 +5338,10 @@ class GalleryView extends ItemView {
       } catch (e) {}
     }
     if (changed) { this.plugin.saveState(); this.invalidateTagIndex(); }
+    // 同 renameTag：非 md 附件的標籤詞也要從搜索索引裡重建
+    if (touchedAssets.length && this.plugin.search) {
+      for (const f of touchedAssets) this.plugin.search.onFileChanged(f);
+    }
     new Notice(t('Deleted #{{tag}} from {{n}} file(s)', { tag: tagPath, n: changed }));
     if (this.plugin.state.activeTag === tagPath) { this.plugin.state.activeTag = ''; this.plugin.saveState(); }
     this.render();
