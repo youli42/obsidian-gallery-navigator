@@ -1508,6 +1508,17 @@ class GalleryView extends ItemView {
     });
     this.registerEvent(this.app.vault.on('delete', markTagDirty));
     this.registerEvent(this.app.vault.on('rename', markTagDirty));
+    /* 圖片載入失敗（404／格式不支援／被 CDN 擋）→ 在元素上留記號。
+       cardSettled 只用 complete/naturalWidth 分不出「還沒載」與「壞了」：
+       壞掉的圖會讓那張卡永遠不定案、高度停在估計值，畫面上留下一塊固定空白。
+       error 事件不冒泡，但捕獲階段會經過 contentEl，所以掛在這裡一次就夠。 */
+    this.registerDomEvent(this.contentEl, 'error', (e) => {
+      const el = e.target;
+      if (!el || el.tagName !== 'IMG') return;
+      el._gnImgError = true;
+      const card = el.closest && el.closest('.gn-card');
+      if (card) this.relayoutWalls(card);
+    }, true);
     // 滑鼠在本視圖上時追蹤（給 Cmd+A 全選判斷用）
     this._hover = false;
     this.registerDomEvent(this.contentEl, 'mouseenter', () => { this._hover = true; });
@@ -6318,6 +6329,8 @@ class GalleryView extends ItemView {
   cardSettled(el) {
     const imgs = el.querySelectorAll ? el.querySelectorAll('img') : [];
     for (const im of imgs) {
+      // 明確載入失敗（見 onOpen 的 error 捕獲）→ 不要再等它，否則這張卡永遠量不到
+      if (im._gnImgError) continue;
       if (!im.complete || !im.naturalWidth) return false;
     }
     /* 內文預覽同樣是非同步才填進來的（loadPreview 要 cachedRead）。
