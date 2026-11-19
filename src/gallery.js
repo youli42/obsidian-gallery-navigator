@@ -3197,6 +3197,21 @@ class GalleryView extends ItemView {
     try { this._ogObserver.observe(card); } catch (e) {}
   }
 
+  /* 寫入 PDF 縮圖快取（含失敗的 null），並維持容量上限。
+     ⚠️ 一定要有上限：存的是 480px PNG 的 base64 字串，每筆約 200–600 KB；
+        這個 Map 掛在 plugin 上（onClose / onunload 都不清），
+        瀏覽一個 200 個 PDF 的資料夾就是 50–120 MB 常駐字串，直到 Obsidian 重啟。
+        Map 保有插入順序，取第一個 key 就是最舊的那筆（近似 LRU 的 FIFO）。 */
+  rememberPdfThumb(cache, key, value) {
+    const PDF_THUMB_MAX = 60;   // 約 12–36 MB 上限
+    while (cache.size >= PDF_THUMB_MAX) {
+      const oldest = cache.keys().next().value;
+      if (oldest === undefined) break;
+      cache.delete(oldest);
+    }
+    cache.set(key, value);
+  }
+
   /** 實際解析 PDF 第一頁 → dataURL（受 pdfGate 併發管制，結果進 _pdfThumbCache） */
   async renderPdfFirstPage(file, cache, key) {
     const pdfjs = await this.plugin.ensurePdfJs();
@@ -3213,20 +3228,15 @@ class GalleryView extends ItemView {
       canvas.width = Math.ceil(vp.width); canvas.height = Math.ceil(vp.height);
       await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
       const dataUrl = canvas.toDataURL('image/png');
-      /* 快取供之後重畫直接用。
-         ⚠️ 一定要設上限：存的是 480px 寬 PNG 的 base64 字串，每筆約 200–600 KB。
-            這個 Map 掛在 plugin 上（不是 view），onClose / onunload 都不會清 ——
-            瀏覽一個 200 個 PDF 的資料夾就是 50–120 MB 常駐字串，直到 Obsidian 重啟。
-            Map 保有插入順序，取第一個 key 就是最舊的那筆（近似 LRU 的 FIFO）。 */
-      const PDF_THUMB_MAX = 60;   // 約 12–36 MB 上限
-      while (cache.size >= PDF_THUMB_MAX) {
-        const oldest = cache.keys().next().value;
-        if (oldest === undefined) break;
-        cache.delete(oldest);
-      }
-      cache.set(key, dataUrl);
+      this.rememberPdfThumb(cache, key, dataUrl);
       return dataUrl;
-    } catch (e) { return null; /* 保留圖示 */ }
+    } catch (e) {
+      /* 負記錄（null）：加密／壞檔／pdf.js 解不開的 PDF，以前每次重畫（切資料夾、
+         捲回來、重排）都會重新 readBinary + 起一次 pdf.js —— 幾份壞檔就能拖垮
+         整個資料夾的瀏覽。快取「這份做不出來」，key 含 mtime，檔案換掉才重試。 */
+      this.rememberPdfThumb(cache, key, null);
+      return null; /* 保留圖示 */
+    }
     finally { try { if (doc) doc.destroy(); } catch (e) {} }
   }
 
