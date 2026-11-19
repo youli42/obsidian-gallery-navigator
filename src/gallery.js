@@ -3976,6 +3976,10 @@ class GalleryView extends ItemView {
       this.renderInner();
     } catch (e) {
       console.error('[Gallery Navigator] render error', e);
+      /* 半途失敗時 root 已經被 empty() 過，但有些旗標只在「成功收尾」的路徑才會
+         復位 —— 卡住之後就再也不生效。例如 _treeScrollLock：restoreTreeScroll 的
+         rAF 沒跑到，之後左樹捲動位置就永遠存不回去（要重開外掛）。 */
+      this._treeScrollLock = false;
       new Notice(t('Gallery render error: {{msg}}', { msg: e && e.message ? e.message : e }), 10000);
     }
   }
