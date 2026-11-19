@@ -249,7 +249,11 @@ function cacheKeyOf(url) {
 }
 
 function faviconUrl(hostname) {
-  return 'https://www.google.com/s2/favicons?domain=' + encodeURIComponent(hostname) + '&sz=64';
+  /* 以前走 www.google.com/s2/favicons：等於把 vault 裡每一張卡片的網域
+     （含 localhost、內網主機名）都交給第三方，離線時還會發一串失敗請求。
+     改成向站台自己要 favicon.ico —— 連線對象跟抓 meta 時是同一個站，
+     沒有多出新的第三方；站台不提供時由 buildDomainRow 的 onerror 退回地球 icon。 */
+  return 'https://' + hostname + '/favicon.ico';
 }
 
 function isSoloParagraph(p) {
