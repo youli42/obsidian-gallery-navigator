@@ -37,15 +37,28 @@ function nodeImage(app, node) {
   return f instanceof TFile ? f : null;
 }
 
+/* Windows 直接拒絕的裝置保留名（CON / NUL / COM1…）。結尾的點與空白同理。 */
+const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+
 function sanitize(name) {
-  return String(name || '').replace(BAD_NAME, '').replace(/\s+/g, ' ').trim();
+  let s = String(name || '').replace(BAD_NAME, '').replace(/\s+/g, ' ').trim();
+  /* 以前只擋非法字元：結尾的點／空白與裝置保留名會讓 vault.create 直接丟錯，
+     整張圖轉換失敗只彈一次 Notice。這裡先修掉，使用者不必重試。 */
+  s = s.replace(/[. ]+$/, '');
+  if (RESERVED.test(s)) s += '_';
+  return s;
 }
 
 /* 不覆蓋既有檔案：同名就往後加序號。回傳完整路徑。 */
 function uniquePath(app, folder, base) {
   const dir = folder ? folder + '/' : '';
+  /* ⚠️ 大小寫不敏感：Windows / macOS 上 Foo.md 與 foo.md 是同一個檔案。
+     只查精確路徑的話，會出現「看起來沒撞名、實際建立失敗」的檔。 */
+  const parent = folder ? app.vault.getAbstractFileByPath(folder) : app.vault.getRoot();
+  const taken = new Set();
+  for (const ch of (parent && parent.children) || []) taken.add(String(ch.name || '').toLowerCase());
   let name = base, n = 1;
-  while (app.vault.getAbstractFileByPath(dir + name + '.md')) {
+  while (taken.has((name + '.md').toLowerCase())) {
     n++;
     name = base + ' ' + n;
   }
@@ -132,4 +145,9 @@ function setupCanvasImageToNote(plugin, InputModal) {
   }));
 }
 
-module.exports = { setupCanvasImageToNote };
+module.exports = {
+  setupCanvasImageToNote,
+  // 匯出純函式方便測試（需要 obsidian 的 TFile / Notice，測試裡用假模組）
+  sanitize,
+  uniquePath,
+};
