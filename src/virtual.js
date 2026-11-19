@@ -260,7 +260,10 @@ class VirtualWall {
     this.gridTop = gr.top - sr.top + this.scroller.scrollTop;
   }
 
-  _update() {
+  /* force=true：這次是「程式化」的跳轉（scrollToPath / 外部指定位置），
+     不是使用者拖捲軸 —— 一定要立刻把新視窗的卡片建出來，
+     不能套用下面「飛太快先留白」的判斷（呼叫端下一步就要拿元素）。 */
+  _update(force) {
     if (this._destroyed || !this.items.length) return;
     /* ⚠️ 這裡**不**重算 gridTop。它是「內容座標」——捲動並不會改變它，
        但 getBoundingClientRect() 每次都會強制一次版面計算，而 _update 是
@@ -316,7 +319,7 @@ class VirtualWall {
           拖曳時每一幀都掃過一整個新視窗，等於每幀蓋掉再重蓋五十張卡，
           主執行緒被吃滿 → 捲軸拖不動、跟不上游標。
           飛過去的畫面本來也看不清楚，先留白，手一慢下來（_scheduleSettle）再補。 */
-    const flinging = jump > viewH * 2.5;
+    const flinging = !force && jump > viewH * 2.5;
     let created = false;
     if (flinging) {
       this._scheduleSettle();
@@ -499,13 +502,23 @@ class VirtualWall {
   notifyContentChanged() { this._scheduleMeasure(); }
 
   // 縮放滑桿改了最小欄寬 → 欄數與欄寬都會變，等同一次完整重排
-  /** items 裡這個 vault 路徑排在第幾個（找不到回 -1） */
+  /** items 裡這個 vault 路徑排在第幾個（找不到回 -1）。
+      建一張 path→index 的快取：settle 迴圈每秒會問好幾次，
+      線性掃全表在幾千張的資料夾等於每幀幾千次字串比較。 */
   indexOfPath(path) {
-    for (let i = 0; i < this.items.length; i++) {
-      const f = this.items[i] && this.items[i].file;
-      if (f && f.path === path) return i;
+    /* 用陣列參照＋長度當失效條件：setItems() 會換一個新陣列。 */
+    if (this._pathIndexSource !== this.items || this._pathIndexLen !== this.items.length) {
+      const m = new Map();
+      for (let i = 0; i < this.items.length; i++) {
+        const f = this.items[i] && this.items[i].file;
+        if (f && f.path && !m.has(f.path)) m.set(f.path, i);
+      }
+      this._pathIndex = m;
+      this._pathIndexSource = this.items;
+      this._pathIndexLen = this.items.length;
     }
-    return -1;
+    const i = this._pathIndex.get(path);
+    return i == null ? -1 : i;
   }
 
   /* 捲到某個項目 —— **不需要它已經掛載**（2026-08-11）。
@@ -536,7 +549,8 @@ class VirtualWall {
       ? cardBot - sc.clientHeight + pad      // 在下方 → 貼底
       : cardTop - pad;                       // 在上方 → 貼頂
     sc.scrollTop = Math.max(0, target);
-    this._update();   // 立刻掛上新視窗的卡片，不等下一幀（呼叫端下一步就要拿元素）
+    // force：這是程式化跳轉，一定要馬上建立卡片（見 _update 的說明）
+    this._update(true);
     return true;
   }
 
