@@ -1540,6 +1540,11 @@ class GalleryView extends ItemView {
     if (this._wallIO) { this._wallIO.disconnect(); this._wallIO = null; }
     if (this._paneRO) { this._paneRO.disconnect(); this._paneRO = null; }
     if (this._syncRaf) { cancelAnimationFrame(this._syncRaf); this._syncRaf = 0; }
+    /* 還在跑的延遲回呼：這些計時器都會改 DOM／寫 state，關掉分頁後才觸發就是
+       操作已卸載的節點。集中收掉，之後新增同類計時器往這個清單加即可。 */
+    for (const k of ['_resizeAnimT', '_treeHideT', '_treeAnimT', '_treeScrollT']) {
+      if (this[k]) { clearTimeout(this[k]); this[k] = 0; }
+    }
     // 關閉分頁 → 停掉還在背景解圖的長寬比預取（下次 render 會自己重啟）
     if (this.plugin.dimPrefetch) this.plugin.dimPrefetch.cancel();
     // 掛在 body 上的浮層要一起收掉（它們不在 contentEl 內，empty() 清不到）
