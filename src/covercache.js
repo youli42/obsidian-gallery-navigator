@@ -33,6 +33,7 @@ const DEFAULT_MB_MOBILE = 50;     // 50 MB：手機磁碟小、也很少一次�
 const MIN_MB = 10;
 const MAX_MB = 2000;
 const SINGLE_MAX_RATIO = 0.25;    // 單張不得超過預算的 1/4
+const LRU_TOUCH_MS = 5 * 60 * 1000; // 命中時多久才更新一次 LRU 時間戳（避免頻繁寫索引）
 
 /* 檔名用的 hash（與 thumbs.js 同一套 cyrb53 風格雙 32-bit，等效 64-bit）。
    ⚠️ 這裡刻意重複一份而不是從 thumbs.js 匯出：兩者檔案路徑不同、生命週期不同，
@@ -114,8 +115,14 @@ class CoverCache {
     /* 檔案可能被使用者（或第三方清理工具）手動刪掉，索引卻還在。
        這裡不驗存在性：getResourcePath 給的網址由瀏覽器去讀，讀不到會走 <img> 的
        error，不影響正確性；驗一次要 await，會拖到卡片繪製路徑。 */
-    rec[3] = Date.now();
-    this.save();
+    /* LRU 時間戳只在「上次命中有一段時間了」才更新＋寫檔。
+       ⚠️ 每次命中都 save() 的話，捲過一屏封面就會不停重置那個 1500ms 去抖，
+       穩定捲動期間等於隔幾秒整份 index.json 重寫一次（幾千筆的 JSON）。 */
+    const now = Date.now();
+    if (now - (rec[3] || 0) > LRU_TOUCH_MS) {
+      rec[3] = now;
+      this.save();
+    }
     try { return a.getResourcePath(this.dir() + '/' + rec[0]); } catch (e) { return null; }
   }
 
