@@ -1562,7 +1562,6 @@ class GalleryView extends ItemView {
     for (const v of (this._virtuals || [])) v.notifyContentChanged();
   }
 
-  // 把左側樹定位到某檔案：展開祖先、選取資料夾、捲到位、標記 active 卡片
   // 這次 file-open 是不是「Canvas 裡的內嵌節點」造成的？
   // Canvas 的圖片/筆記節點各自是內嵌 leaf，點下去 Obsidian 會替那個檔案送 file-open，
   // 同步定位就會跳到 img/。真正在看的還是那張 Canvas → 這種事件一律略過。
@@ -1598,6 +1597,7 @@ class GalleryView extends ItemView {
     return true;
   }
 
+  // 把左側樹定位到某檔案：展開祖先、選取資料夾、捲到位、標記 active 卡片
   syncToFile(file) {
     if (this.drag) return;                        // 拖曳進行中 → 不重繪，避免中斷拖曳
     if (this.plugin.state.leftMode === 'tag') return;   // 標籤模式不做資料夾定位
