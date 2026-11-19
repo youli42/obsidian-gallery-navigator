@@ -75,55 +75,63 @@ class DimPrefetcher {
     this.queue = want;
     this.onBatch = onBatch || null;
     this.done = 0;
-    const n = document.body.classList.contains('is-mobile') ? CONCURRENCY_MOBILE : CONCURRENCY_DESKTOP;
-    for (let i = 0; i < n; i++) this._pump();
+    // 併發由 _pump() 自己按 busy/limit 控制（舊世代的 in-flight 仍算在內）
+    this._pump();
     return total;
+  }
+
+  limit() {
+    return document.body.classList.contains('is-mobile') ? CONCURRENCY_MOBILE : CONCURRENCY_DESKTOP;
   }
 
   cancel() {
     this.token++;
     this.queue = [];
     this.onBatch = null;
-    /* busy 歸零＝「舊的 in-flight 不再計入併發」。
-       配合 finish() 裡「token 不符就不動 busy」，才不會等舊工作回來把 busy 減成負數
-       （負數會讓實際併發變成 CONCURRENCY + |負值|，破壞壓記憶體的前提）。 */
-    this.busy = 0;
+    /* ⚠️ 不要在這裡把 busy 歸零。舊的 in-flight 是一張**正在解碼的原圖**，
+       歸零會讓新的一輪照滿額再開一批，實際併發變成兩倍 —— 正好破壞這個模組
+       存在的理由（壓住手機的峰值記憶體，見檔頭）。
+       busy 一律由 finish() 歸還，不管回呼屬於哪一代。 */
   }
 
   _pump() {
-    if (!this.queue.length) {
-      // 全部跑完 → 最後回報一次，讓版面用完整資訊重算
-      if (this.busy === 0 && this.onBatch) { const cb = this.onBatch; this.onBatch = null; cb(true); }
-      return;
+    const limit = this.limit();
+    while (this.busy < limit && this.queue.length) {
+      const my = this.token;
+      const job = this.queue.shift();
+      this.busy++;
+
+      const img = new Image();
+      let settled = false;
+      const finish = (w, h) => {
+        if (settled) return;
+        settled = true;
+        img.onload = img.onerror = null;
+        img.src = '';                          // 立刻放掉，不等 GC
+        this.busy--;                           // in-flight 一定會歸還（不論哪一代）
+        /* 已經換資料夾：結果作廢、不寫索引。但還是要 _pump()，否則舊工作佔著的
+           名額空出來後，新佇列會停在那裡等不到人來推。 */
+        if (my === this.token && w > 0 && h > 0) {
+          (this.plugin._dimIndex || (this.plugin._dimIndex = {}))[job.key] = [w, h];
+          this.plugin.saveDimIndex();
+          this.done++;
+          if (this.done % BATCH_NOTIFY === 0 && this.onBatch) this.onBatch(false);
+        }
+        this._pump();
+      };
+
+      img.onload = () => finish(img.naturalWidth, img.naturalHeight);
+      // 失敗也要往下走，否則整條佇列會卡住（壞檔、權限、路徑失效都可能）
+      img.onerror = () => finish(0, 0);
+      img.decoding = 'async';
+      img.src = job.src;
     }
-    const my = this.token;
-    const job = this.queue.shift();
-    this.busy++;
-
-    const img = new Image();
-    let settled = false;
-    const finish = (w, h) => {
-      if (settled) return;
-      settled = true;
-      img.onload = img.onerror = null;
-      img.src = '';                            // 立刻放掉，不等 GC
-      // 已經換資料夾了：這筆結果作廢，且 busy 已被 cancel() 歸零 → 不能再減（會變負數）
-      if (my !== this.token) return;
-      this.busy--;
-      if (w > 0 && h > 0) {
-        (this.plugin._dimIndex || (this.plugin._dimIndex = {}))[job.key] = [w, h];
-        this.plugin.saveDimIndex();
-        this.done++;
-        if (this.done % BATCH_NOTIFY === 0 && this.onBatch) this.onBatch(false);
-      }
-      this._pump();
-    };
-
-    img.onload = () => finish(img.naturalWidth, img.naturalHeight);
-    // 失敗也要往下走，否則整條佇列會卡住（壞檔、權限、路徑失效都可能）
-    img.onerror = () => finish(0, 0);
-    img.decoding = 'async';
-    img.src = job.src;
+    // 全部跑完 → 最後回報一次，讓版面用完整資訊重算
+    if (!this.queue.length && this.busy === 0 && this.onBatch) {
+      const cb = this.onBatch;
+      this.onBatch = null;
+      cb(true);
+    }
   }
 }
 
