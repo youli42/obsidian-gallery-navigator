@@ -6,6 +6,10 @@
 # 沒裝的話前三組照跑，最後一組會失敗。
 cd "$(dirname "$0")/.." || exit 1
 set -e
+echo "== i18n（兩份字典的 key 一致、程式用到的字面 key 都有翻譯）"
+node --no-warnings tests/i18n.test.js
+echo "== 淨化連結（追蹤參數、&amp; 分隔符、Markdown 強調符號）"
+node --no-warnings tests/cleanlink.test.js
 echo "== 連結卡快取（過期先顯示、背景重抓、Threads／IG 請求數、淘汰順序）"
 node --no-warnings tests/linkcard-cache.test.js
 echo "== 設定合併（三方合併的純函式）"
