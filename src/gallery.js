@@ -1771,7 +1771,9 @@ class GalleryView extends ItemView {
       return;
     }
     try {
-      const leaf = this.app.workspace.getLeaf(!!newTab);
+      /* 'tab' 而不是 true：getLeaf(boolean) 的 true 是舊語意（部分版本會被當成
+         「分割面板」），要新分頁一律傳 'tab'（同 createNoteIn 的寫法）。 */
+      const leaf = this.app.workspace.getLeaf(newTab ? 'tab' : false);
       await leaf.openFile(file, { eState: { focus: false } });
     } catch (e) {
       this.app.workspace.openLinkText(file.path, '', !!newTab);   // 萬一 API 變動退回舊路
