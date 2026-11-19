@@ -83,7 +83,15 @@ function startReorderDrag({ event, row, scroller, rows, onDrop }) {
 
   const handle = event.currentTarget;
   const pid = event.pointerId;
-  try { handle.setPointerCapture(pid); } catch (e) {}
+  /* 指標捕獲失敗不是「罕見錯誤」而是會讓拖曳整組卡死：監聽器都掛在 handle 上，
+     手指一離開把手就收不到 pointermove/pointerup，rAF 永遠空轉、
+     gn-treorder-active 留在畫面上。捕獲沒生效就改掛到 document 兜底。 */
+  let captured = false;
+  try {
+    handle.setPointerCapture(pid);
+    captured = typeof handle.hasPointerCapture === 'function' ? handle.hasPointerCapture(pid) : true;
+  } catch (e) { captured = false; }
+  const listenTarget = captured ? handle : (handle.ownerDocument || document);
 
   const startY = event.clientY;
   let y = startY, dirty = true, done = false, raf = 0;
@@ -142,11 +150,11 @@ function startReorderDrag({ event, row, scroller, rows, onDrop }) {
     if (done) return;
     done = true;
     cancelAnimationFrame(raf);
-    handle.removeEventListener('pointermove', onMove);
-    handle.removeEventListener('pointerup', onUp);
-    handle.removeEventListener('pointercancel', onCancel);
-    handle.removeEventListener('lostpointercapture', onCancel);
-    try { handle.releasePointerCapture(pid); } catch (e) {}
+    listenTarget.removeEventListener('pointermove', onMove);
+    listenTarget.removeEventListener('pointerup', onUp);
+    listenTarget.removeEventListener('pointercancel', onCancel);
+    listenTarget.removeEventListener('lostpointercapture', onCancel);
+    if (captured) { try { handle.releasePointerCapture(pid); } catch (e) {} }
     scroller.classList.remove('gn-treorder-active');
     /* 位置有變才交給呼叫端。它會重畫整棵樹 —— 這時所有列都還停在拖曳中的樣子，
        呼叫端可以據此把動畫接上。重畫後這些舊元素已不在畫面上，restore 只是保險
@@ -161,10 +169,10 @@ function startReorderDrag({ event, row, scroller, rows, onDrop }) {
   const onUp = (e) => { if (e.pointerId === pid) finish(true); };
   const onCancel = (e) => { if (e.pointerId === pid) finish(false); };
 
-  handle.addEventListener('pointermove', onMove);
-  handle.addEventListener('pointerup', onUp);
-  handle.addEventListener('pointercancel', onCancel);
-  handle.addEventListener('lostpointercapture', onCancel);
+  listenTarget.addEventListener('pointermove', onMove, { passive: false });
+  listenTarget.addEventListener('pointerup', onUp);
+  listenTarget.addEventListener('pointercancel', onCancel);
+  if (captured) listenTarget.addEventListener('lostpointercapture', onCancel);
   raf = requestAnimationFrame(frame);
   return true;
 }
