@@ -128,11 +128,32 @@ function cleanUrl(raw, opt) {
   const query = raw.slice(qIdx + 1, hashIdx < 0 ? undefined : hashIdx);
   const hash = hashIdx < 0 ? '' : raw.slice(hashIdx);
 
-  const parts = query.split('&').filter((p) => p !== '');
-  const kept = parts.filter((p) => !isTracking(p.split('=')[0], optH));
+  /* 參數連同「前面的分隔符」一起拆，分隔符可能是 '&' 或 HTML 轉義的 '&amp;'。
+     ⚠️ 以前是直接 query.split('&')：從 HTML 原始碼複製來的
+        '?utm_source=1&amp;fbclid=2' 會被拆成 ['utm_source=1', 'amp;fbclid=2']，
+        砍掉第一個之後重建出 '?amp;fbclid=2' —— 原網址被改壞、fbclid 反而留著。
+        保留每個參數原本的分隔符，重建時逐字放回去。 */
+  const parts = [];
+  {
+    const re = /&amp;|&/g;
+    let start = 0;
+    let sep = '';
+    let m;
+    while ((m = re.exec(query))) {
+      const text = query.slice(start, m.index);
+      if (text) parts.push({ sep, text });
+      sep = m[0];
+      start = m.index + m[0].length;
+    }
+    const last = query.slice(start);
+    if (last) parts.push({ sep, text: last });
+  }
+  const kept = parts.filter((p) => !isTracking(p.text.split('=')[0], optH));
   if (kept.length === parts.length) return raw;
 
-  return base + (kept.length ? '?' + kept.join('&') : '') + hash;
+  // 第一個留下的參數不帶分隔符（緊接在 '?' 後面）
+  const q = kept.map((p, i) => (i ? p.sep : '') + p.text).join('');
+  return base + (kept.length ? '?' + q : '') + hash;
 }
 
 /* 把網址尾端誤抓進來的標點切掉，回傳 [網址, 尾巴] */
@@ -154,8 +175,20 @@ function splitTrailing(u) {
 function cleanText(text, opt) {
   const o = normalizeOpt(opt);
   let count = 0;
-  const out = String(text).replace(URL_RE, (m) => {
+  const out = String(text).replace(URL_RE, (m, offset, whole) => {
     let [url, tail] = splitTrailing(m);
+    /* 被 Markdown 強調符號包住時（**網址** / __網址__ / ~~網址~~ / _網址_），
+       收尾的那半會被 URL_RE 一起吃進 match，接著又跟著 query 值被當成追蹤碼刪掉，
+       只留下開頭那一半：'~~https://a.com/x?utm_source=1~~' → '~~https://a.com/x'。
+       貼上淨化預設是開的，等於靜默改壞筆記。
+       只有「前一個字元剛好是同一個開符號」時才把結尾那半還給 tail ——
+       一般網址結尾真的可能帶 '_'，不能無條件剝掉。 */
+    // 只看前兩個字元（不要 slice(0, offset)：長筆記裡每條網址都複製一次前綴會是 O(n²)）
+    const open = /(\*\*|__|~~|\*|_)$/.exec(whole.slice(Math.max(0, offset - 2), offset));
+    if (open && url.length > open[1].length && url.endsWith(open[1])) {
+      tail = open[1] + tail;
+      url = url.slice(0, -open[1].length);
+    }
     /* query 裡出現非 ASCII 字元 → 從那裡切開，後面原樣接回去、不參與淨化。
        網址後面直接接中文又沒有標點時（…?utm_source=ig這篇很好），那段中文會被當成參數值；
        切開之後最壞的情況只是「該刪的參數沒刪到」，不會把內文刪掉。 */
