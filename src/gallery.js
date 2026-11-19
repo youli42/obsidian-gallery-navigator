@@ -1865,22 +1865,6 @@ class GalleryView extends ItemView {
 
   // （2026-07-20 移除）連結牆整套下架：outgoingMdFiles / incomingMdFiles / showLinks / renderLinksWall 一併移除。
 
-  // 在資料夾內新建檔案（自動避開同名），建立後開啟。ext: md / canvas / base
-  async newFile(folder, ext, content) {
-    const dir = !folder || folder.path === '/' ? '' : folder.path + '/';
-    let path = dir + t('Untitled') + '.' + ext;
-    let n = 1;
-    while (this.app.vault.getAbstractFileByPath(path)) { path = dir + t('Untitled') + ' ' + n + '.' + ext; n++; }
-    try {
-      const file = await this.app.vault.create(path, content || '');
-      /* 這裡不自己 render()：vault 'create' 事件 → refreshViews() 的 150ms 去抖
-         本來就會重畫這個 View，多打一次只是把整頁重建成本翻倍。 */
-      this.openNote(file, false);
-    } catch (e) {
-      new Notice(t('Failed to create: {{msg}}', { msg: e && e.message ? e.message : e }));
-    }
-  }
-
   /* 桌機右鍵 + 手機長按 → 同一個選單。build(ctx) 需回傳未 show 的 Menu；
      **回傳 null 就不開選單**，用來讓「容器上的選單」對子元素讓路。
 
@@ -2611,30 +2595,6 @@ class GalleryView extends ItemView {
     this._menuItem(menu, 'view', (i) => i.setTitle(t('Clear selection')).setIcon('x')
       .onClick(() => this.clearFolderSel()));
     return menu;
-  }
-
-  // 新增資料夾（先問名稱）
-  newFolder(parentFolder) {
-    new InputModal(this.app, t('New folder'), '', async (name) => {
-      const dir = !parentFolder || parentFolder.path === '/' ? '' : parentFolder.path + '/';
-      const path = dir + name;
-      if (this.app.vault.getAbstractFileByPath(path)) { new Notice(t('A folder with that name already exists')); return; }
-      try {
-        await this.app.vault.createFolder(path);
-        // 展開父層並選取新資料夾
-        const expanded = new Set(this.plugin.state.expandedFolders || []);
-        let acc = '';
-        for (const seg of path.split('/').slice(0, -1)) { acc = acc ? acc + '/' + seg : seg; expanded.add(acc); }
-        this.plugin.state.expandedFolders = [...expanded];
-        this.clearSearchState();
-        this.path = path;
-        this.plugin.state.lastPath = path;
-        this.plugin.saveState();
-        this.render();
-      } catch (e) {
-        new Notice(t('Failed to create folder: {{msg}}', { msg: e && e.message ? e.message : e }));
-      }
-    }).open();
   }
 
   // 實際執行改名（會自動更新所有 [[wiki-link]]，並沿用選取/展開狀態）
