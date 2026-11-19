@@ -7257,7 +7257,8 @@ class GnSearchIndex {
       ];
     } else {
       let raw = '';
-      try { raw = await this.app.vault.cachedRead(f); } catch (e) { return; }
+      // 讀不到 → 回 false：呼叫端要保留索引裡的舊版本，不能先拆再建
+      try { raw = await this.app.vault.cachedRead(f); } catch (e) { return false; }
       const cache = this.app.metadataCache.getFileCache(f) || {};
       // 欄位加權：檔名 8 > 標題/標籤 3 > 內文 1
       fields = [
@@ -7277,6 +7278,11 @@ class GnSearchIndex {
       }
     }
 
+    /* 同一路徑只留最新的一份：先 push 新的，再拆舊的那筆。
+       ⚠️ 不能在這裡呼叫 _tombstone(path)：它會照 byPath 拆，而 byPath 已經指向
+          剛 push 的新文件。也因為這裡是在所有 await 之後才取 prevId，
+          同一路徑重疊的索引請求（modify 去抖 vs rename/create）不會留下兩份。 */
+    const prevId = this.byPath.get(f.path);
     const id = this.docs.length;
     for (const [tok, n] of tf) {
       let arr = this.inv.get(tok);
@@ -7290,7 +7296,15 @@ class GnSearchIndex {
     this.byPath.set(f.path, id);
     this.totalLen += len;
     this.live++;
+    if (prevId != null && prevId !== id && this.docs[prevId]) {
+      const pd = this.docs[prevId];
+      this.totalLen -= pd.len;
+      this.live--;
+      this.deadLen += pd.len;
+      this.docs[prevId] = null;          // 舊版本變成墓碑，等 maybeCompact 清 postings
+    }
     this.avgLen = this.totalLen / Math.max(1, this.live) || 1;
+    return true;
   }
 
   /* 把某個 path 的舊資料標成墓碑。
@@ -7396,9 +7410,12 @@ class GnSearchIndex {
     const keep = this.indexable(file);
     // md / pdf 永遠該在索引裡；其他檔型標籤被拿光 → 只移除、不再索引
     if (!keep && (file.extension === 'md' || file.extension === 'pdf')) return;
-    this._tombstone(file.path);
-    if (!keep) { this.maybeCompact(); return; }
-    await this._indexFile(file);
+    if (!keep) { this._tombstone(file.path); this.maybeCompact(); return; }
+    /* ⚠️ 先建新的、成功之後才拆舊的（_indexFile 內部會把同一路徑的舊版本標成墓碑）。
+       以前是「先 _tombstone 再 _indexFile」，而 _indexFile 讀檔失敗會靜默 return
+       → 這篇就永久離開索引，直到下次被修改才回來。 */
+    const ok = await this._indexFile(file);
+    if (!ok) return;
     this.maybeCompact();
     // 新加進來的 PDF → 背景把內文抽出來（抽完會自己再索引一次）
     if (file.extension === 'pdf') this.warmPdfCache();
@@ -7427,11 +7444,16 @@ class GnSearchIndex {
   onFileDeleted(file) {
     if (!this.ready) return;
     this._tombstone(file.path);
+    /* 刪除／改名以前只立墓碑、從不整理：死 postings 永久留在 inv，而搜尋用
+       df = arr.length/2 算 IDF → 幽靈文件把常用詞的 df 墊高，真正的結果反而
+       被「df>N*0.6 視為常用詞」那道過濾殺掉。 */
+    this.maybeCompact();
   }
   async onFileRenamed(file, oldPath) {
     if (!this.ready) return;
     this._tombstone(oldPath);
     if (this.indexable(file)) await this._indexFile(file);
+    this.maybeCompact();
   }
 
   /* ── 背景暖機：把「還沒擷取過」的 PDF 慢慢抽完，使用者不用做任何事 ──
