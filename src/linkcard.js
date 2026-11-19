@@ -1856,6 +1856,10 @@ class LinkCardModule {
       if (!activeView.containerEl.contains(evt.target)) return;
 
       const editor = activeView.editor;
+      /* ⚠️ 貼上「當下」就把游標位置記下來。下面要等 resolveShortUrl + fetchMeta
+         （單一請求就能等 12 秒），回來時使用者常常已經把游標移到別的段落，
+         拿那時的光標去插會把貼文內文接到錯的行尾。 */
+      const at = editor.getCursor();
       setTimeout(async () => {
         try {
           /* 短連結先等展開，再對「正式網址」抓 meta。
@@ -1867,8 +1871,10 @@ class LinkCardModule {
             : text;
           const meta = await fetchMeta(url);
           if (!meta.description) return;
-          const cursor = editor.getCursor();
-          const insertPos = { line: cursor.line, ch: editor.getLine(cursor.line).length };
+          // 筆記被刪短了也要夾在同一個合法範圍內
+          let line = at.line;
+          try { line = Math.min(line, Math.max(0, editor.lineCount() - 1)); } catch (e) {}
+          const insertPos = { line, ch: editor.getLine(line).length };
           editor.replaceRange('\n' + meta.description, insertPos);
         } catch (e) {
           console.warn('[LCP] paste insert failed:', e.message);
