@@ -242,8 +242,14 @@ class CoverCache {
     let removed = 0;
     for (const p of Object.keys(this.index)) {
       if (this.app.vault.getAbstractFileByPath(p)) continue;
-      try { await a.remove(this.dir() + '/' + this.index[p][0]); } catch (e) {}
-      this.used -= this.index[p][2] || 0;
+      /* ⚠️ 先把紀錄取到區域變數：await 期間 set()/forget() 可能已經把同一路徑
+         改寫或刪掉，回頭再讀 this.index[p] 會是 undefined（TypeError 中斷整輪），
+         或把剛寫進來的新紀錄當成舊的扣帳再 delete。 */
+      const rec = this.index[p];
+      if (!rec) continue;
+      try { await a.remove(this.dir() + '/' + rec[0]); } catch (e) {}
+      if (this.index[p] !== rec) continue;   // await 期間被動過 → 這筆不歸我處理
+      this.used -= rec[2] || 0;
       delete this.index[p];
       removed++;
     }
