@@ -9174,4 +9174,4 @@ class GalleryPlugin extends Plugin {
   }
 };
 
-module.exports = { GalleryPlugin, GallerySettingTab, VIEW_TYPE };
+module.exports = { GalleryPlugin, GallerySettingTab, GalleryView, VIEW_TYPE };
