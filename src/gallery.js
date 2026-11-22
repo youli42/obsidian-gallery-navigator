@@ -2472,7 +2472,12 @@ class GalleryView extends ItemView {
     };
     const esc = (e) => { if (e.key === 'Escape') this.closeMorePopover(); };
     this._moreCloser = closer; this._moreEsc = esc;
-    setTimeout(() => {
+    /* 延後掛是為了避開「點開錨點的那一下」本身。但若在同一個 tick 內就關掉
+       （程式路徑／例外），這裡到點才掛上去 → 之後永遠不會被移除（閉包握著 view）。
+       記下計時器，到點前再確認浮層還開著（2026-11-22）。 */
+    this._moreListenT = setTimeout(() => {
+      this._moreListenT = 0;
+      if (this._morePop !== pop) return;   // 已經關掉了
       doc.addEventListener('mousedown', closer);
       doc.addEventListener('keydown', esc);
     }, 0);
@@ -2482,6 +2487,7 @@ class GalleryView extends ItemView {
     // 移除監聽要用「當初掛上去的那個 document」（見 viewDocument）
     const doc = this._moreDoc || this.viewDocument();
     this._moreDoc = null;
+    if (this._moreListenT) { clearTimeout(this._moreListenT); this._moreListenT = 0; }
     if (this._moreCloser) { doc.removeEventListener('mousedown', this._moreCloser); this._moreCloser = null; }
     if (this._moreEsc) { doc.removeEventListener('keydown', this._moreEsc); this._moreEsc = null; }
     // ⚠️ 錨點可能已被 render 重建（class 隨舊 DOM 一起消失），但這裡照樣要清 ——
@@ -4251,7 +4257,10 @@ class GalleryView extends ItemView {
     };
     const esc = (e) => { if (e.key === 'Escape') this.closeListPopover(); };
     this._listCloser = closer; this._listEsc = esc;
-    setTimeout(() => {
+    // 同 openMorePopover：同一個 tick 內就關掉時，到點不要再把監聽掛上去
+    this._listListenT = setTimeout(() => {
+      this._listListenT = 0;
+      if (this._listPop !== pop) return;
       doc.addEventListener('mousedown', closer);
       doc.addEventListener('keydown', esc);
     }, 0);
@@ -4261,6 +4270,7 @@ class GalleryView extends ItemView {
     // 同 closeMorePopover：一定從當初掛監聽的那個 document 移除
     const doc = this._listDoc || this.viewDocument();
     this._listDoc = null;
+    if (this._listListenT) { clearTimeout(this._listListenT); this._listListenT = 0; }
     if (this._listCloser) { doc.removeEventListener('mousedown', this._listCloser); this._listCloser = null; }
     if (this._listEsc) { doc.removeEventListener('keydown', this._listEsc); this._listEsc = null; }
     if (this._listAnchor) { this.markAnchorOpen(this._listAnchor, false); this._listAnchor = null; }
