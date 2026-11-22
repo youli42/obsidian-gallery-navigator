@@ -1478,6 +1478,10 @@ class GalleryView extends ItemView {
 
   async onOpen() {
     this._closed = false;   // 同一個實例可能被重新打開（Obsidian 會重用 leaf 的 view）
+    /* 重開時把「上一輪屬於自己的」關分頁守衛清掉（2026-11-22）：它可能還握著一個
+       已 detach 的 leaf，留到重開後會讓使用者第一次真正的導覽被吞掉。 */
+    const staleGuard = this.plugin._lastOpenFromGallery;
+    if (staleGuard && staleGuard.owner === this) this.plugin._lastOpenFromGallery = null;
     /* 同 syncToFile / refreshViews：寬度 0 時建出來的牆沒有排版（見 syncToFile 的說明）。
        開啟 Obsidian 時若畫廊收在側欄，這裡就會是 0 —— 先記旗標，等 onResize 再畫。 */
     if (this.contentEl && this.contentEl.clientWidth > 0) {
@@ -1503,14 +1507,16 @@ class GalleryView extends ItemView {
        關閉沒有伴隨 file-open（例如關掉最後一個分頁）→ 丟掉守衛，
        免得吞掉使用者下一次真正的導覽。 */
     this.registerEvent(this.app.workspace.on('layout-change', () => {
-      const rec = this._lastOpenFromGallery;
+      const rec = this.plugin._lastOpenFromGallery;
       if (!rec) return;
       const stillThere = rec.leaf ? this.isLeafAlive(rec.leaf) : this.isFileOpenInAnyLeaf(rec.path);
       if (stillThere) return;             // 分頁還開著 → 等它真的被關
-      window.setTimeout(() => {
-        if (this._lastOpenFromGallery !== rec) return;   // 已被消耗或換人了
+      if (this._tabGuardPruneT) window.clearTimeout(this._tabGuardPruneT);
+      this._tabGuardPruneT = window.setTimeout(() => {
+        this._tabGuardPruneT = 0;
+        if (this.plugin._lastOpenFromGallery !== rec) return;   // 已被消耗或換人了
         const alive = rec.leaf ? this.isLeafAlive(rec.leaf) : this.isFileOpenInAnyLeaf(rec.path);
-        if (!alive) this._lastOpenFromGallery = null;
+        if (!alive) this.plugin._lastOpenFromGallery = null;
       }, 1200);
     }));
     // 標籤索引快取失效：metadata 變動或檔案增刪改名時標記，下次用到才重建
@@ -1565,6 +1571,10 @@ class GalleryView extends ItemView {
     /* 標記「這個實例已經關了」：搜尋/縮圖那些 async 續段回來時要先看它，
        否則會對已卸載的 DOM 續做（_main 仍指向舊節點）。onOpen 會再清掉。 */
     this._closed = true;
+    /* 關掉視圖：屬於自己的關分頁守衛不會再有人來消耗（layout-change 監聽一併回收），
+       留著只會吞掉之後真正的導覽（2026-11-22）。計時器收在下面的清單。 */
+    const guard = this.plugin._lastOpenFromGallery;
+    if (guard && guard.owner === this) this.plugin._lastOpenFromGallery = null;
     // gn-leaf 掛在外層的 .workspace-leaf-content 上（不屬於 contentEl，empty() 清不到）
     // → 關閉時自己收回來，避免這個葉面板被別的 view 重用時殘留樣式
     if (this.contentEl && this.contentEl.parentElement) this.contentEl.parentElement.removeClass('gn-leaf');
@@ -1580,7 +1590,7 @@ class GalleryView extends ItemView {
     if (this._syncRaf) { cancelAnimationFrame(this._syncRaf); this._syncRaf = 0; }
     /* 還在跑的延遲回呼：這些計時器都會改 DOM／寫 state，關掉分頁後才觸發就是
        操作已卸載的節點。集中收掉，之後新增同類計時器往這個清單加即可。 */
-    for (const k of ['_resizeAnimT', '_treeHideT', '_treeAnimT', '_treeScrollT']) {
+    for (const k of ['_resizeAnimT', '_treeHideT', '_treeAnimT', '_treeScrollT', '_guardReleaseT', '_tabGuardPruneT']) {
       if (this[k]) { clearTimeout(this[k]); this[k] = 0; }
     }
     // 關閉分頁 → 停掉還在背景解圖的長寬比預取（下次 render 會自己重啟）
@@ -1629,14 +1639,29 @@ class GalleryView extends ItemView {
        · 這次開的就是剛才從畫廊開的那個檔案 → 照常（它自己被打開）
        · 剛才那個分頁還在佈局裡（只是內容被換成別的檔）→ 使用者自己換檔，照常跟隨
        · 分頁已經不在佈局裡 → 是關閉造成的餘波，吞掉這個事件、留在原地
-     原生開啟路徑（openLinkText）拿不到 leaf 時，退回「檔案是否還開在任何分頁」判斷。 */
+     原生開啟路徑（openLinkText）拿不到 leaf 時，退回「檔案是否還開在任何分頁」判斷。
+
+     ⚠️ 守衛放在 plugin 上（同 _skipSyncPath）：同一個 file-open 會依序送給每個
+        畫廊視圖，放在實例上就只有「開圖的那個視圖」不跳，另一個照樣跳目錄。
+     ⚠️ 判定為關閉餘波時**不能在這裡清**（第一個視圖清掉，後面的就看不到了）：
+        改成下一個 tick 才收，見 releaseTabCloseGuard。 */
   isAfterGalleryTabClose(file) {
-    const rec = this._lastOpenFromGallery;
+    const rec = this.plugin._lastOpenFromGallery;
     if (!rec) return false;
     if (file && file.path === rec.path) return false;
     const stillOpen = rec.leaf ? this.isLeafAlive(rec.leaf) : this.isFileOpenInAnyLeaf(rec.path);
-    this._lastOpenFromGallery = null;
-    return !stillOpen;
+    if (stillOpen) { this.plugin._lastOpenFromGallery = null; return false; }   // 分頁還在＝使用者自己換檔
+    this.releaseTabCloseGuard(rec);
+    return true;
+  }
+
+  /* 守衛的延後清收：等這一輪 file-open 送完所有畫廊視圖再清，避免第二個視圖照樣跳。 */
+  releaseTabCloseGuard(rec) {
+    if (this._guardReleaseT) window.clearTimeout(this._guardReleaseT);
+    this._guardReleaseT = window.setTimeout(() => {
+      this._guardReleaseT = 0;
+      if (this.plugin._lastOpenFromGallery === rec) this.plugin._lastOpenFromGallery = null;
+    }, 0);
   }
 
   // 分頁（Leaf）是否還在佈局裡：關掉的分頁會從 workspace 移除，但物件仍被守衛握著
@@ -1859,7 +1884,7 @@ class GalleryView extends ItemView {
       /* openLinkText 不會回傳 leaf，而它開檔是延後的：此刻 activeLeaf 很可能還是
          畫廊自己的側欄 leaf（或舊 leaf）。猜錯會讓守衛誤判成「分頁還活著」→ 失效，
          所以這裡一律記 leaf:null，關閉判定改用「檔案是否還開在任何分頁」（2026-11-22）。 */
-      this._lastOpenFromGallery = { path: file.path, leaf: null };
+      this.plugin._lastOpenFromGallery = { path: file.path, leaf: null, owner: this };
       return;
     }
     let openedLeaf = null;
@@ -1873,7 +1898,7 @@ class GalleryView extends ItemView {
       this.app.workspace.openLinkText(file.path, '', !!newTab);   // 萬一 API 變動退回舊路
       openedLeaf = null;   // 同上：退回路徑拿不到可靠的 leaf，走「是否還開在任何分頁」判定
     }
-    this._lastOpenFromGallery = { path: file.path, leaf: openedLeaf };
+    this.plugin._lastOpenFromGallery = { path: file.path, leaf: openedLeaf, owner: this };
     const blurNow = () => {
       try {
         const mv = this.app.workspace.getActiveViewOfType(MarkdownView);
