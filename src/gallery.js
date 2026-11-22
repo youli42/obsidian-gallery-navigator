@@ -4795,19 +4795,23 @@ class GalleryView extends ItemView {
       syncTreeVar(w);   // root 的雙欄底色分界跟著左欄寬度
       pendingW = w;
     };
+    /* 拖曳監聽與視窗（rAF）一律在**事件發生的當下**取（2026-11-22）：
+       畫廊可以直接被拖進獨立窗口，DOM 會被 adopt 到另一個 document ——
+       render 時抓到的那個 doc/win 就過期了（拿舊的掛 mousemove/mouseup 收不到
+       popout 裡的拖曳、body 游標殘留在別的窗口、rAF 也可能被暫停的窗口吃掉）。 */
+    let dragWin = null;
     const onMove = (e) => {
       dragX = e.clientX;
-      if (!moveRaf) moveRaf = requestAnimationFrame(applyW);
+      if (!moveRaf && dragWin) moveRaf = dragWin.requestAnimationFrame(applyW);
     };
-    /* 拖曳監聽要掛在**分隔桿所在的那個 document**（2026-11-22）：畫廊被拖到獨立
-       窗口時，全域 document 指的是主窗口，掛上去的 mousemove/mouseup 收不到
-       popout 裡的拖曳 → 分隔桿拉不動，body 游標還會殘留在主窗口。 */
-    const doc = splitter.ownerDocument;
     const onUp = () => {
+      const doc = splitter.ownerDocument;
+      const win = doc.defaultView || window;
       doc.body.style.cursor = '';
       doc.removeEventListener('mousemove', onMove);
       doc.removeEventListener('mouseup', onUp);
-      if (moveRaf) { cancelAnimationFrame(moveRaf); moveRaf = 0; applyW(); }   // 補上最後一次位置
+      if (moveRaf) { win.cancelAnimationFrame(moveRaf); moveRaf = 0; applyW(); }   // 補上最後一次位置
+      dragWin = null;
       dragRect = null;
       if (pendingW != null) { state.treeWidth = Math.round(pendingW); this.plugin.saveState(); }
     };
@@ -4815,6 +4819,8 @@ class GalleryView extends ItemView {
       // ⚠️ 讀即時狀態，不用 render 當下的 treeHidden —— 就地開合不重畫，快照會過期
       if (splitter.hasClass('gn-split-handle-collapsed')) return;
       e.preventDefault();
+      const doc = splitter.ownerDocument;
+      dragWin = doc.defaultView || window;
       dragRect = split.getBoundingClientRect();   // 拖曳期間容器不會變 → 讀一次就夠
       dragX = e.clientX;
       doc.body.style.cursor = 'col-resize';
