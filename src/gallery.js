@@ -2097,12 +2097,28 @@ class GalleryView extends ItemView {
   // 工具列的「⋯ 更多」面板：排序 / 卡片大小（真滑桿）/ 圓角 / 攤平 / 重新整理
   // 用自訂浮動面板而不是 Obsidian 的 Menu —— Menu 只吃「選項列」，塞不進滑桿，
   // 而且會被迫再開一層子選單。這裡全部攤平成單層。
+  /* 視圖自己所在的 document／window（2026-11-22）。
+     畫廊可以被拖到獨立窗口，那裡是**另一個** document —— 全域的 document／window
+     指的是主窗口：浮層掛錯文件就完全不出現在使用者眼前（fixed 只相對所在文件的
+     視口），外點關閉與 Esc 的監聽掛錯文件則永遠收不到。 */
+  viewDocument() {
+    const el = this.contentEl;
+    return (el && el.ownerDocument) || document;
+  }
+
+  viewWindow() {
+    const doc = this.viewDocument();
+    return doc.defaultView || window;
+  }
+
   openMorePopover(anchor) {
     if (this._morePop) { this.closeMorePopover(); return; }   // 再點一次＝收起（走同一條路徑，才會一併清事件）
     this.closeListPopover();   // 浮層互斥：同時開兩個會有兩顆錨點都亮著
     const state = this.plugin.state;
-    const pop = document.body.createDiv('gn-more-pop');
+    const doc = this.viewDocument();
+    const pop = doc.body.createDiv('gn-more-pop');
     this._morePop = pop;
+    this._moreDoc = doc;   // 關閉時要從**同一個** document 移除監聽
     /* 選單開著時錨點鈕維持 hover 樣式。has-active-menu 是 **Obsidian 原生**就有的 class，
        語意正是「這顆鈕的選單正開著」，主題（Velocity 等）本來就把它跟 :hover / :active
        寫在同一條規則裡 → 有支援的主題直接吃到，沒支援的由 gallery.css 的保底規則接手。 */
@@ -2361,14 +2377,17 @@ class GalleryView extends ItemView {
     const esc = (e) => { if (e.key === 'Escape') this.closeMorePopover(); };
     this._moreCloser = closer; this._moreEsc = esc;
     setTimeout(() => {
-      document.addEventListener('mousedown', closer);
-      document.addEventListener('keydown', esc);
+      doc.addEventListener('mousedown', closer);
+      doc.addEventListener('keydown', esc);
     }, 0);
   }
 
   closeMorePopover() {
-    if (this._moreCloser) { document.removeEventListener('mousedown', this._moreCloser); this._moreCloser = null; }
-    if (this._moreEsc) { document.removeEventListener('keydown', this._moreEsc); this._moreEsc = null; }
+    // 移除監聽要用「當初掛上去的那個 document」（見 viewDocument）
+    const doc = this._moreDoc || this.viewDocument();
+    this._moreDoc = null;
+    if (this._moreCloser) { doc.removeEventListener('mousedown', this._moreCloser); this._moreCloser = null; }
+    if (this._moreEsc) { doc.removeEventListener('keydown', this._moreEsc); this._moreEsc = null; }
     // ⚠️ 錨點可能已被 render 重建（class 隨舊 DOM 一起消失），但這裡照樣要清 ——
     //    否則整頁重畫時若剛好沿用同一顆元素，會留下永遠亮著的鈕。
     if (this._moreAnchor) { this.markAnchorOpen(this._moreAnchor, false); this._moreAnchor = null; }
@@ -4073,17 +4092,21 @@ class GalleryView extends ItemView {
      ⚠️ 一定要在**內容填完之後**呼叫：空浮層量到的 offsetWidth 不是最終寬度。
      ⚠️ 設 left 前要清掉 right —— fixed 元素兩端都有值時寬度會被拉開撐爆。 */
   placePopover(pop, anchor) {
+    /* 視窗尺寸要取**浮層所在文件**的 viewport（2026-11-22）：畫廊在獨立窗口時，
+       window.innerWidth/innerHeight 是主窗口的尺寸，跟 popout 裡的錨點座標
+       不是同一個座標系 → 浮層會被算到畫面外或夾成錯誤位置。 */
+    const win = (pop.ownerDocument && pop.ownerDocument.defaultView) || this.viewWindow();
     const rect = anchor.getBoundingClientRect();
-    const up = rect.top > window.innerHeight * 0.5;
+    const up = rect.top > win.innerHeight * 0.5;
     pop.style.top = ''; pop.style.bottom = '';
-    if (up) pop.style.bottom = (window.innerHeight - rect.top + 6) + 'px';
+    if (up) pop.style.bottom = (win.innerHeight - rect.top + 6) + 'px';
     else pop.style.top = (rect.bottom + 6) + 'px';
     pop.toggleClass('gn-pop-up', up);
 
     const w = pop.offsetWidth;
     const centered = rect.left + rect.width / 2 - w / 2;
     pop.style.right = '';
-    pop.style.left = Math.max(8, Math.min(centered, window.innerWidth - w - 8)) + 'px';
+    pop.style.left = Math.max(8, Math.min(centered, win.innerWidth - w - 8)) + 'px';
     pop.addClass('gn-pop-center');
   }
 
@@ -4103,8 +4126,10 @@ class GalleryView extends ItemView {
       if (same) return;        // 同一顆鈕 = toggle 關閉
     }
     this.closeMorePopover();   // 浮層互斥
-    const pop = document.body.createDiv('gn-more-pop gn-list-pop');
+    const doc = this.viewDocument();
+    const pop = doc.body.createDiv('gn-more-pop gn-list-pop');
     this._listPop = pop;
+    this._listDoc = doc;   // 同 _moreDoc：關閉時從同一個 document 移除監聽
     this._listAnchor = anchor;
     this.markAnchorOpen(anchor, true);
 
@@ -4131,14 +4156,17 @@ class GalleryView extends ItemView {
     const esc = (e) => { if (e.key === 'Escape') this.closeListPopover(); };
     this._listCloser = closer; this._listEsc = esc;
     setTimeout(() => {
-      document.addEventListener('mousedown', closer);
-      document.addEventListener('keydown', esc);
+      doc.addEventListener('mousedown', closer);
+      doc.addEventListener('keydown', esc);
     }, 0);
   }
 
   closeListPopover() {
-    if (this._listCloser) { document.removeEventListener('mousedown', this._listCloser); this._listCloser = null; }
-    if (this._listEsc) { document.removeEventListener('keydown', this._listEsc); this._listEsc = null; }
+    // 同 closeMorePopover：一定從當初掛監聽的那個 document 移除
+    const doc = this._listDoc || this.viewDocument();
+    this._listDoc = null;
+    if (this._listCloser) { doc.removeEventListener('mousedown', this._listCloser); this._listCloser = null; }
+    if (this._listEsc) { doc.removeEventListener('keydown', this._listEsc); this._listEsc = null; }
     if (this._listAnchor) { this.markAnchorOpen(this._listAnchor, false); this._listAnchor = null; }
     if (this._listPop) { this._listPop.remove(); this._listPop = null; }
   }
