@@ -1491,9 +1491,27 @@ class GalleryView extends ItemView {
       // 只跳過「從行事曆開的那個特定檔案」——用路徑比對，不用無差別旗標
       // （否則日記若已開著、不觸發 file-open，旗標會殘留 → 被之後點的連結誤消耗 → 連結不定位）
       if (file && this.plugin._skipSyncPath === file.path) { this.plugin._skipSyncPath = null; return; }
+      /* 關掉「從畫廊開的分頁」後被激活的鄰居分頁不是導覽意圖（見 isAfterGalleryTabClose）。
+         放在 syncActive 判斷之前：守衛要無條件消耗／清掉，否則會殘留到之後真正的導覽。 */
+      if (this.isAfterGalleryTabClose(file)) return;
       if (!this.plugin.state.syncActive) return;
       if (this.isCanvasEmbed(file)) return;   // 在 Canvas 裡點圖片/內嵌節點 → 不要跳去 img/
       this.syncToFile(file);
+    }));
+    /* 守衛的收尾（見 isAfterGalleryTabClose）：關分頁時 layout-change 先到、餘波的
+       file-open 幾乎同時到。若 1.2 秒內都沒人來消耗、那個分頁也真的關了，代表這次
+       關閉沒有伴隨 file-open（例如關掉最後一個分頁）→ 丟掉守衛，
+       免得吞掉使用者下一次真正的導覽。 */
+    this.registerEvent(this.app.workspace.on('layout-change', () => {
+      const rec = this._lastOpenFromGallery;
+      if (!rec) return;
+      const stillThere = rec.leaf ? this.isLeafAlive(rec.leaf) : this.isFileOpenInAnyLeaf(rec.path);
+      if (stillThere) return;             // 分頁還開著 → 等它真的被關
+      window.setTimeout(() => {
+        if (this._lastOpenFromGallery !== rec) return;   // 已被消耗或換人了
+        const alive = rec.leaf ? this.isLeafAlive(rec.leaf) : this.isFileOpenInAnyLeaf(rec.path);
+        if (!alive) this._lastOpenFromGallery = null;
+      }, 1200);
     }));
     // 標籤索引快取失效：metadata 變動或檔案增刪改名時標記，下次用到才重建
     const markTagDirty = () => { this._tagDirty = true; this._tagGen++; };
@@ -1600,6 +1618,47 @@ class GalleryView extends ItemView {
     const el = leaf && leaf.containerEl;
     if (el && typeof el.closest === 'function' && el.closest('.canvas-node')) return true;
     return false;
+  }
+
+  /* 這次 file-open 是不是「剛關掉從畫廊開的分頁」造成的？（2026-11-22）
+     openNote() 用 getLeaf() 直接換掉當前分頁；Ctrl+W 關掉它之後，Obsidian 會激活
+     鄰居分頁並送出**那個**檔案的 file-open。那不是使用者的導覽意圖，照 syncToFile
+     走就會把左樹與卡片牆帶去那個舊筆記的資料夾（回報：關掉一張圖片，目錄跟著跳）。
+
+     判斷方式：
+       · 這次開的就是剛才從畫廊開的那個檔案 → 照常（它自己被打開）
+       · 剛才那個分頁還在佈局裡（只是內容被換成別的檔）→ 使用者自己換檔，照常跟隨
+       · 分頁已經不在佈局裡 → 是關閉造成的餘波，吞掉這個事件、留在原地
+     原生開啟路徑（openLinkText）拿不到 leaf 時，退回「檔案是否還開在任何分頁」判斷。 */
+  isAfterGalleryTabClose(file) {
+    const rec = this._lastOpenFromGallery;
+    if (!rec) return false;
+    if (file && file.path === rec.path) return false;
+    const stillOpen = rec.leaf ? this.isLeafAlive(rec.leaf) : this.isFileOpenInAnyLeaf(rec.path);
+    this._lastOpenFromGallery = null;
+    return !stillOpen;
+  }
+
+  // 分頁（Leaf）是否還在佈局裡：關掉的分頁會從 workspace 移除，但物件仍被守衛握著
+  isLeafAlive(leaf) {
+    let alive = false;
+    this.app.workspace.iterateAllLeaves((l) => { if (l === leaf) alive = true; });
+    return alive;
+  }
+
+  // 這個檔案是否還開在任何分頁裡（延遲載入的分頁要看 viewState，view.file 可能還沒建）
+  isFileOpenInAnyLeaf(path) {
+    let open = false;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (open || !leaf) return;
+      const view = leaf.view;
+      if (view && view.file && view.file.path === path) { open = true; return; }
+      try {
+        const st = leaf.getViewState && leaf.getViewState();
+        if (st && st.state && st.state.file === path) open = true;
+      } catch (e) { /* 取不到狀態的分頁不算 */ }
+    });
+    return open;
   }
 
   /* 這個檔案是不是「目前這面牆上本來就有」的項目。
@@ -1791,18 +1850,27 @@ class GalleryView extends ItemView {
     // Live Preview 的首行嵌入圖片就不會展開成 ![[...]] 原始碼。
     // 作法：openFile 直接要求不聚焦（eState.focus:false），再於開檔後幾個時間點補 blur
     // （Obsidian 某些路徑會晚一步搶焦點）→ 不會像先前 120ms 單發那樣「閃一下」。
+    /* 記下「這個分頁是從畫廊開的」（2026-11-22）：它被關掉時 Obsidian 會激活鄰居
+       分頁並送出那個檔案的 file-open —— 那不是導覽意圖，見 isAfterGalleryTabClose。
+       ⚠️ 一定要在開啟**之後**才記：開啟當下的 file-open 要照常走同步定位（同牆分支），
+          先記的話會把「它自己被打開」那次也一起吞掉。 */
     if (this.plugin.state.openUnfocused === false) {   // 設定關閉 → 原生行為
       this.app.workspace.openLinkText(file.path, '', !!newTab);
+      this._lastOpenFromGallery = { path: file.path, leaf: this.app.workspace.activeLeaf || null };
       return;
     }
+    let openedLeaf = null;
     try {
       /* 'tab' 而不是 true：getLeaf(boolean) 的 true 是舊語意（部分版本會被當成
          「分割面板」），要新分頁一律傳 'tab'（同 createNoteIn 的寫法）。 */
       const leaf = this.app.workspace.getLeaf(newTab ? 'tab' : false);
+      openedLeaf = leaf;
       await leaf.openFile(file, { eState: { focus: false } });
     } catch (e) {
       this.app.workspace.openLinkText(file.path, '', !!newTab);   // 萬一 API 變動退回舊路
+      openedLeaf = this.app.workspace.activeLeaf || null;
     }
+    this._lastOpenFromGallery = { path: file.path, leaf: openedLeaf };
     const blurNow = () => {
       try {
         const mv = this.app.workspace.getActiveViewOfType(MarkdownView);
