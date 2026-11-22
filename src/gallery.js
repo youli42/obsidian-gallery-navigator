@@ -1856,7 +1856,10 @@ class GalleryView extends ItemView {
           先記的話會把「它自己被打開」那次也一起吞掉。 */
     if (this.plugin.state.openUnfocused === false) {   // 設定關閉 → 原生行為
       this.app.workspace.openLinkText(file.path, '', !!newTab);
-      this._lastOpenFromGallery = { path: file.path, leaf: this.app.workspace.activeLeaf || null };
+      /* openLinkText 不會回傳 leaf，而它開檔是延後的：此刻 activeLeaf 很可能還是
+         畫廊自己的側欄 leaf（或舊 leaf）。猜錯會讓守衛誤判成「分頁還活著」→ 失效，
+         所以這裡一律記 leaf:null，關閉判定改用「檔案是否還開在任何分頁」（2026-11-22）。 */
+      this._lastOpenFromGallery = { path: file.path, leaf: null };
       return;
     }
     let openedLeaf = null;
@@ -1868,7 +1871,7 @@ class GalleryView extends ItemView {
       await leaf.openFile(file, { eState: { focus: false } });
     } catch (e) {
       this.app.workspace.openLinkText(file.path, '', !!newTab);   // 萬一 API 變動退回舊路
-      openedLeaf = this.app.workspace.activeLeaf || null;
+      openedLeaf = null;   // 同上：退回路徑拿不到可靠的 leaf，走「是否還開在任何分頁」判定
     }
     this._lastOpenFromGallery = { path: file.path, leaf: openedLeaf };
     const blurNow = () => {
