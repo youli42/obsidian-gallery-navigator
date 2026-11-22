@@ -4731,10 +4731,14 @@ class GalleryView extends ItemView {
       dragX = e.clientX;
       if (!moveRaf) moveRaf = requestAnimationFrame(applyW);
     };
+    /* 拖曳監聽要掛在**分隔桿所在的那個 document**（2026-11-22）：畫廊被拖到獨立
+       窗口時，全域 document 指的是主窗口，掛上去的 mousemove/mouseup 收不到
+       popout 裡的拖曳 → 分隔桿拉不動，body 游標還會殘留在主窗口。 */
+    const doc = splitter.ownerDocument;
     const onUp = () => {
-      document.body.style.cursor = '';
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
+      doc.body.style.cursor = '';
+      doc.removeEventListener('mousemove', onMove);
+      doc.removeEventListener('mouseup', onUp);
       if (moveRaf) { cancelAnimationFrame(moveRaf); moveRaf = 0; applyW(); }   // 補上最後一次位置
       dragRect = null;
       if (pendingW != null) { state.treeWidth = Math.round(pendingW); this.plugin.saveState(); }
@@ -4745,9 +4749,9 @@ class GalleryView extends ItemView {
       e.preventDefault();
       dragRect = split.getBoundingClientRect();   // 拖曳期間容器不會變 → 讀一次就夠
       dragX = e.clientX;
-      document.body.style.cursor = 'col-resize';
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
+      doc.body.style.cursor = 'col-resize';
+      doc.addEventListener('mousemove', onMove);
+      doc.addEventListener('mouseup', onUp);
     });
     /* 分隔線上的開合鈕（hover 分隔線時浮出，不觸發拖曳）。
        收合中箭頭朝右＝展開，展開中箭頭朝左＝收合。 */
