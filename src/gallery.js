@@ -4490,7 +4490,7 @@ class GalleryView extends ItemView {
     /* 左樹名稱過濾（桌機）：輸入列在捲動區外，過濾時不會跟著列表重畫。 */
     if (!isMobileUI && this._treeFilterOn && state.leftMode !== 'tag') {
       const fw = tree.createDiv('gn-tree-filter');
-      setIcon(fw.createDiv('gn-tree-filter-ic'), 'filter');
+      setIcon(fw.createDiv('gn-tree-filter-ic'), 'search');
       const input = fw.createEl('input', { type: 'search', cls: 'gn-tree-filter-input' });
       input.placeholder = t('Filter folders…');
       input.value = this._treeFilter || '';
@@ -4592,8 +4592,8 @@ class GalleryView extends ItemView {
     /* 左樹工具（2026-11-18）。桌機限定；手機維持原況。 */
     if (!isMobileUI) {
       if (state.leftMode !== 'tag') {
-        const filterBtn = btn.filter = this.mkBarBtn(tray, 'filter', t('Filter folders'), { on: this._treeFilterOn });
-        filterBtn.onclick = () => {
+        const treeSearchBtn = btn.treeSearch = this.mkBarBtn(tray, 'search', t('Filter folders'), { on: this._treeFilterOn });
+        treeSearchBtn.onclick = () => {
           this._treeFilterOn = !this._treeFilterOn;
           if (!this._treeFilterOn) this._treeFilter = '';
           this.render();
@@ -4698,7 +4698,7 @@ class GalleryView extends ItemView {
     if (isMobileUI) {
       for (const k of ['new', 'mode', 'sort', 'search', 'more']) if (btn[k]) bar.appendChild(btn[k]);
     } else {
-      for (const k of ['mode', 'filter', 'collapse']) if (btn[k]) topLeft.appendChild(btn[k]);
+      for (const k of ['mode', 'treeSearch', 'collapse']) if (btn[k]) topLeft.appendChild(btn[k]);
 
       /* 常駐：目前路徑 + 數量 + 標籤篩選。以前這些都在牆內表頭，往下捲就看不到。 */
       const topCtx = topRight.createDiv('gn-top-context');
