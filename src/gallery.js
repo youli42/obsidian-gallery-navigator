@@ -2441,6 +2441,24 @@ class GalleryView extends ItemView {
       };
     }
 
+    /* ── 始终显示文件名（2026-11-23）──
+       只影响 overlay 版面：标题／日期从图片上的 hover 渐变移到图片下方。
+       会改变卡片高度 → 关闭面板后整页重画，高度缓存 key 也带着这个状态。 */
+    {
+      const nameRow = pop.createDiv('gn-more-row');
+      nameRow.toggleClass('gn-more-row-on', !!state.alwaysFileName);
+      setIcon(nameRow.createSpan('gn-more-icon'), 'file-text');
+      nameRow.createSpan('gn-more-text').setText(t('Always show file name'));
+      const nameMark = nameRow.createSpan('gn-more-check');
+      if (state.alwaysFileName) setIcon(nameMark, 'check');
+      nameRow.onclick = () => {
+        state.alwaysFileName = !state.alwaysFileName;
+        this.plugin.saveState();
+        this.closeMorePopover();
+        this.render();
+      };
+    }
+
     pop.createDiv('gn-more-sep');
 
     /* （2026-08-11 移除）攤平開關列。手機的牆內表頭已跟桌機一樣有攤平鈕
@@ -4486,6 +4504,8 @@ class GalleryView extends ItemView {
     // 'stacked' ＝ 舊版「圖上文下」，CSS 用 .gn-imgcard-stacked 切回底層規則（見 gallery.css）。
     root.toggleClass('gn-imgcard-stacked', this._layout === 'stacked');
     root.toggleClass('gn-imgcard-editorial', this._layout === 'editorial');
+    /* 显示选项「始终显示文件名」：overlay 版面也把标题／日期放到图片下方（见 gallery.css）。 */
+    root.toggleClass('gn-always-filename', !!this.plugin.state.alwaysFileName);
     this.applyCardRadius();   // 卡片圓角（「⋯ 更多」的滑桿）：重畫後要重新套上
 
     // 手機：contentEl 本身就是 .view-content；它的父層（.workspace-leaf-content）
@@ -4735,7 +4755,7 @@ class GalleryView extends ItemView {
     }
 
     // 右：⋯ 更多（排序 / 卡片大小滑桿 / 重新整理 → 單層浮動面板）
-    const moreBtn = btn.more = this.mkBarBtn(tray, isMobileUI ? 'more-horizontal' : 'sliders-horizontal', t('View options (layout / size / corners)'));
+    const moreBtn = btn.more = this.mkBarBtn(tray, isMobileUI ? 'more-horizontal' : 'sliders-horizontal', t('View options (layout / size / corners / file name)'));
     moreBtn.onclick = (e) => { e.stopPropagation(); this.openMorePopover(moreBtn); };
 
     /* 依平台放入容器：手機沿用原本的底部排列；桌機分成導覽／內容兩組。 */
@@ -6594,8 +6614,15 @@ class GalleryView extends ItemView {
     return true;
   }
 
-  cardKind(it) {
+  /* 高度缓存的版型 key：始终显示文件名会改变 overlay 的卡片高度，
+     必须一起算进 key，否则切换后仍沿用旧的「只有图片」高度。 */
+  heightLayoutKey() {
     const layout = this._layout || 'overlay';
+    return (layout === 'overlay' && this.plugin.state.alwaysFileName) ? layout + ':name' : layout;
+  }
+
+  cardKind(it) {
+    const layout = this.heightLayoutKey();
     const dims = this.plugin._dimIndex || {};
     /* 有長寬比可用的「延遲圖片卡」（og／PDF）走的是圖片算式，
        固定開銷跟純文字卡差很多，混在一起學會把兩邊都拉歪 → 獨立一類。 */
@@ -6618,15 +6645,16 @@ class GalleryView extends ItemView {
        這是「第二次開同一個資料夾完全不閃」的關鍵：_pack() 第一輪就算出正確位置，
        之後 measure() 量到的與預測一致 → changed 恆為 false → 不再重排。
        放在最前面，因為它比任何推算都準（它就是實測值）。 */
-    const known = this.plugin.cardHeightFor(this.dimKeyOf(it), colW, layout || 'overlay');
+    const known = this.plugin.cardHeightFor(this.dimKeyOf(it), colW, this.heightLayoutKey());
     if (known) return known;
 
     const dims = this.plugin._dimIndex || {};
     // 圖片卡的高度：欄寬 × 長寬比，再加上該版型文字區的固定開銷
+    const alwaysName = layout === 'overlay' && !!this.plugin.state.alwaysFileName;
     const imgCard = (ratio) => {
       const imgH = colW * ratio;
       if (layout === 'editorial') return imgH + 96;
-      if (layout === 'stacked') return imgH + 62;
+      if (layout === 'stacked' || alwaysName) return imgH + 62;
       return imgH;
     };
 
@@ -6946,7 +6974,7 @@ class GalleryView extends ItemView {
       kindOf: (it) => this.cardKind(it),
       isSettled: (el) => this.cardSettled(el),
       // 實測高度存進索引：下次開同一個資料夾就能一次算準、完全不重排
-      onMeasured: (it, h, colW) => this.plugin.recordCardHeight(this.dimKeyOf(it), h, colW, this._layout || 'overlay'),
+      onMeasured: (it, h, colW) => this.plugin.recordCardHeight(this.dimKeyOf(it), h, colW, this.heightLayoutKey()),
     });
     // 圖片載入完成 → 卡片高度變了 → 重新量測。
     // 捕獲階段一條就涵蓋所有後續插入的圖（load 不冒泡）。
@@ -7873,7 +7901,7 @@ class GalleryPlugin extends Plugin {
        本機那份優先；升級後第一次執行還沒有 → 沿用 data.json 裡的（以前都存在那裡）。 */
     const disk = (await this.loadData()) || {};
     const localSaved = this.loadLocalState();
-    this.state = Object.assign({ lastPath: '', cardWidth: 120, sort: 'new', folderOrder: {}, hiddenFolders: [], folderColors: {}, expandedFolders: [], treeWidth: 232, treeCollapsed: false, syncActive: true, leftMode: 'folder', activeTag: '', expandedTags: [], cardColors: {}, noPreviewFolders: [], folderLayouts: {}, favorites: [], pinnedCards: [], assetTags: {}, lang: '', openUnfocused: true, imageCardLayout: 'stacked', autoCardColor: false, excalidrawThumbs: true, videoCovers: true, videoCoverMaxMB: 0, coverCacheMB: 0, dragOut: 'ctrl' }, disk, localSaved ? splitState(localSaved).local : null);
+    this.state = Object.assign({ lastPath: '', cardWidth: 120, sort: 'new', folderOrder: {}, hiddenFolders: [], folderColors: {}, expandedFolders: [], treeWidth: 232, treeCollapsed: false, syncActive: true, leftMode: 'folder', activeTag: '', expandedTags: [], cardColors: {}, noPreviewFolders: [], folderLayouts: {}, favorites: [], pinnedCards: [], assetTags: {}, lang: '', openUnfocused: true, imageCardLayout: 'stacked', autoCardColor: false, excalidrawThumbs: true, videoCovers: true, videoCoverMaxMB: 0, coverCacheMB: 0, dragOut: 'ctrl', alwaysFileName: false }, disk, localSaved ? splitState(localSaved).local : null);
     /* 舊版 dev 把封面快取上限存在 xcalCacheMB（2026-11-16 同日改名為 coverCacheMB）。
        不繼承的話，調過上限的人會悄悄回到預設值（桌機 200MB、手機 50MB）。
        ⚠️ 只有在「舊版寫過、新版還來不及寫」時才套用：一旦 data.json 有 coverCacheMB

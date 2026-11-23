@@ -1601,6 +1601,32 @@ body:not(.is-mobile) .gn-swap-cell:hover { transform: scale(1.03); box-shadow: 0
 .gn-root:not(.gn-imgcard-stacked):not(.gn-imgcard-editorial) .gn-card.gn-has-img.gn-icon-cover .gn-title { color: var(--text-normal); text-shadow: none; }
 .gn-root:not(.gn-imgcard-stacked):not(.gn-imgcard-editorial) .gn-card.gn-has-img.gn-icon-cover .gn-date { color: var(--text-faint); text-shadow: none; }
 
+/* 显示选项「始终显示文件名」（2026-11-23）：只改 overlay 版面。
+   标题／日期不再叠在图片上，改成图片下方的正常流，卡片高度自然包含这一段。
+   特异度比上面的 overlay 规则多一个 .gn-always-filename，且排在后面。 */
+.gn-root.gn-always-filename:not(.gn-imgcard-stacked):not(.gn-imgcard-editorial) .gn-card.gn-has-img .gn-body {
+  position: relative; left: auto; right: auto; bottom: auto;
+  z-index: 1;
+  padding: 8px 12px 9px;
+  background: inherit;
+  opacity: 1; pointer-events: auto;
+  transition: none;
+}
+.gn-root.gn-always-filename:not(.gn-imgcard-stacked):not(.gn-imgcard-editorial) .gn-card.gn-has-img .gn-title {
+  color: var(--text-normal); text-shadow: none;
+}
+.gn-root.gn-always-filename:not(.gn-imgcard-stacked):not(.gn-imgcard-editorial) .gn-card.gn-has-img .gn-date {
+  margin-top: 4px;
+  color: var(--text-faint); text-shadow: none;
+}
+/* 上过色的卡片：文字改用卡片自己的对比色。 */
+.gn-root.gn-always-filename:not(.gn-imgcard-stacked):not(.gn-imgcard-editorial) .gn-card.gn-card-colored.gn-has-img .gn-title {
+  color: var(--gn-card-fg);
+}
+.gn-root.gn-always-filename:not(.gn-imgcard-stacked):not(.gn-imgcard-editorial) .gn-card.gn-card-colored.gn-has-img .gn-date {
+  color: color-mix(in srgb, var(--gn-card-fg) 72%, transparent);
+}
+
 /* ===== 圖片卡版面③「編輯風索引卡」（imageCardLayout='editorial'，2026-07-20 新增）=====
    版型（2026-08-04 大翻面）：**左上標題＋內文 / 左下大日數・小月年 / 右下小方縮圖**。
    （原版是「左上縮圖 ＋ 右上日期 ＋ 下方標題」，等於上下、左右都對調。）

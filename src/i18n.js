@@ -74,6 +74,7 @@ const ZH_TW = {
   'Create here (folder / note / canvas / base)': '在此新建（資料夾 / 筆記 / Canvas / Base）',
   'More (card layout / size / corners)': '更多（卡片版型 / 大小 / 圓角）',
   'View options (layout / size / corners)': '顯示選項（版型 / 大小 / 圓角）',
+  'View options (layout / size / corners / file name)': '顯示選項（版型 / 大小 / 圓角 / 檔名）',
   'This folder': '本資料夾',
   'Default image card layout': '預設圖片卡版型',
   'Used for folders without their own override. To override one folder, open the view menu on that folder.': '沒有個別設定時使用。要覆寫單一資料夾，在該資料夾的顯示選單裡改。',
@@ -249,6 +250,7 @@ const ZH_TW = {
   'Mobile only. Paints the sidebar drawer with the gallery background and removes the blank strip above it, so the gallery blends into the drawer instead of sitting in it as a grey block. Only applies while the gallery is the active drawer tab; other tabs are untouched.':
     '僅手機。把側欄抽屜塗成畫廊的底色、並移除上方那條空白帶，讓畫廊融進抽屜，而不是像一塊灰色方塊卡在裡面。只在畫廊是作用中的抽屜分頁時生效，其他分頁不受影響。',
   'Card corners': '卡片圓角',
+  'Always show file name': '永遠顯示檔名',
   'Image card layout': '圖片卡版面',
   /* 圖片卡版面用場景命名（2026-08-10）。刻意**中英文都用同一個英文名**：
      它們是三種版型的代號、不是描述，翻成中文反而失去「一看就懂是哪個場景」的效果。
@@ -422,6 +424,7 @@ const ZH_CN = {
   'Create here (folder / note / canvas / base)': '在此新建（文件夹 / 笔记 / Canvas / Base）',
   'More (card layout / size / corners)': '更多（卡片布局 / 大小 / 圆角）',
   'View options (layout / size / corners)': '显示选项（布局 / 大小 / 圆角）',
+  'View options (layout / size / corners / file name)': '显示选项（布局 / 大小 / 圆角 / 文件名）',
   'This folder': '当前文件夹',
   'Default image card layout': '默认图片卡布局',
   'Used for folders without their own override. To override one folder, open the view menu on that folder.': '没有单独设置时使用。要覆盖单个文件夹，请在该文件夹的显示菜单中修改。',
@@ -595,6 +598,7 @@ const ZH_CN = {
   'Mobile only. Paints the sidebar drawer with the gallery background and removes the blank strip above it, so the gallery blends into the drawer instead of sitting in it as a grey block. Only applies while the gallery is the active drawer tab; other tabs are untouched.':
     '仅移动端。将侧边栏抽屉染成画廊的背景色，并移除上方那条空白带，让画廊融入抽屉，而不是像一块灰色方块卡在里面。仅在画廊是当前活动的抽屉标签页时生效，其他标签页不受影响。',
   'Card corners': '卡片圆角',
+  'Always show file name': '始终显示文件名',
   'Image card layout': '图片卡片布局',
   /* 图片卡片布局用场景命名。刻意中英文都用同一个英文名：
      它们是三种布局的代号、不是描述，翻成中文反而失去「一看就懂是哪个场景」的效果。 */
