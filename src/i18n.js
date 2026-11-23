@@ -173,6 +173,11 @@ const ZH_TW = {
   'Filter folders': '過濾資料夾',
   'Filter folders…': '過濾資料夾…',
   'No matching folders': '沒有符合的資料夾',
+  // ── 卡片墙筛选（文件类型 / 标签）──
+  'Text': '文字', 'Video': '影片', 'Other': '其他',
+  'File type': '檔案類型',
+  'Filter by tag and file type': '依標籤與檔案類型篩選',
+  'Clear filters': '清除全部篩選',
   'Color': '顏色', 'Auto (by name)': '自動（依名稱）', 'Show text preview': '顯示內文',
   'Unhide': '取消隱藏', 'Hide this folder': '隱藏這個資料夾', 'Reveal in Finder': '在 Finder 顯示',
   'Delete folder': '刪除資料夾',
@@ -514,6 +519,11 @@ const ZH_CN = {
   'Filter folders': '筛选文件夹',
   'Filter folders…': '筛选文件夹…',
   'No matching folders': '没有匹配的文件夹',
+  // ── 卡片墙筛选（文件类型 / 标签）──
+  'Text': '文本', 'Video': '视频', 'Other': '其他',
+  'File type': '文件类型',
+  'Filter by tag and file type': '按标签和文件类型筛选',
+  'Clear filters': '清除全部筛选',
   'Color': '颜色', 'Auto (by name)': '自动（按名称）', 'Show text preview': '显示正文',
   'Unhide': '取消隐藏', 'Hide this folder': '隐藏此文件夹', 'Reveal in Finder': '在 Finder 中显示',
   'Delete folder': '删除文件夹',

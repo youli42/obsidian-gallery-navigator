@@ -2044,6 +2044,19 @@ body:not(.is-mobile) .gn-card:not(.gn-has-img) .gn-date { margin-top: auto; padd
   display: flex; flex-wrap: wrap; align-items: center; gap: 7px;
   /* ⚠️ 這裡不要加 padding —— 會變成軌道的最小高度，收合不掉（見上方說明） */
 }
+/* 筛选列的分区标签与分隔线（2026-11-23）：类型芯片在前、标签在后。 */
+.gn-filterbar-label {
+  flex: none;
+  font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--text-faint);
+  padding: 0 2px;
+}
+.gn-filterbar-sep {
+  flex: none;
+  width: 1px; height: 16px;
+  margin: 0 3px;
+  background: color-mix(in srgb, var(--background-modifier-border) 80%, transparent);
+}
 /* 標籤晶片不畫外框：底色本身就分得出膠囊形狀，密集排列時加框會變成一片格線。
    hover 與選取態的 border-color 一併失效，否則互動時會突然冒出一條線。
    padding 補 1px，補回拿掉外框少的那一圈。 */

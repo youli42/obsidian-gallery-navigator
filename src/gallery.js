@@ -451,6 +451,8 @@ class SwapImageModal extends Modal {
 
 const VIEW_TYPE = 'gallery-navigator';
 const IMG_EXT = /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i;
+/* “文字”类型桶：只有真正的文本文档。PDF / Canvas / Base 等归入“其他”。 */
+const TEXT_EXT = new Set(['md', 'txt']);
 
 /* 卡片主色快取上限（key = path:mtime，逛過的每張圖都會留一筆 → 沒上限就是單調成長）。
    ⚠️ 2026-08-09：這行原本夾在另一個模組的常數群裡，該模組整段移除時被一起掃掉 →
@@ -925,6 +927,8 @@ const SORT_KEYS = Object.keys(SORTS);
 /* 合法的圖片卡版面。單一來源，全域設定與資料夾覆寫都用它驗證 ——
    下架某個版面時只要從這裡拿掉，舊 data.json 裡的殘值就會自動退回預設。 */
 const GN_LAYOUTS = ['overlay', 'stacked', 'editorial'];
+/* 文件类型筛选的桶与显示字符串。key 是内部值，value 是 i18n key。 */
+const TYPE_FILTERS = { image: 'Image', text: 'Text', video: 'Video', other: 'Other' };
 function sortItems(items, key) {
   const s = SORTS[key] || SORTS.new;
   return items.slice().sort(s.fn);
@@ -1425,6 +1429,7 @@ class GalleryView extends ItemView {
     this.selAnchor = null;       // 範圍選的錨點
     this._treeFilterOn = false;  // 左樹名稱過濾（桌機）
     this._treeFilter = '';
+    this._typeFilter = new Set();  // 文件类型筛选（图片／文字／视频／其他）
     /* 資料夾多選（2026-08-18）—— 跟卡片的 selected 分開放，不共用。
        兩者的批次操作對象不同（檔案 vs 資料夾），混在一起「移動」會分不清該搬什麼。
        folderSelMode 是**手機專用**的選取模式：手機沒有 Cmd/Shift，
@@ -1859,12 +1864,19 @@ class GalleryView extends ItemView {
     this._searchTreeOpen = false;
   }
 
+  /* 切换文件夹时清掉卡片墙的筛选。标签与文件类型共用同一条路径 ——
+     以前只有 _tagFilter，两处各自 new Set()，很容易漏掉新加的筛选轴。 */
+  resetCardFilters() {
+    this._tagFilter = new Set();
+    this._typeFilter = new Set();
+  }
+
   navigate(path) {
     this._pendingAnchor = null;   // 使用者自己選了資料夾 → 取消待辦的定位，別等一下亂跳
     this.clearSearchState();      // 搜尋是暫時狀態：點資料夾就回到資料夾牆（搜尋框是常駐的）
     this.path = path;
     this.plugin.state.lastPath = path;
-    this._tagFilter = new Set();   // 換資料夾 → 清掉上一夾的標籤篩選
+    this.resetCardFilters();   // 切换文件夹 → 清掉上一个文件夹的标签／类型筛选
     this.plugin.saveState();
     this.render();
     this.gotoCardsMobile();        // 手機：選完資料夾就滑到右邊的卡片欄
@@ -2085,6 +2097,21 @@ class GalleryView extends ItemView {
       if (tags.some((t) => t === want || t.startsWith(want + '/'))) return true;
     }
     return false;
+  }
+
+  /* 文件类型分桶。用 itemFromFile 已经算好的 isImg / isVideo / ext，
+     不要去碰 it.src —— 那会为了分类而触发封面解析。 */
+  fileKindOf(it) {
+    if (it.isImg) return 'image';
+    if (it.isVideo) return 'video';
+    if (TEXT_EXT.has(it.ext)) return 'text';
+    return 'other';
+  }
+
+  // 这张卡是否命中当前的类型筛选（多选＝OR）
+  matchTypeFilter(it) {
+    if (!this._typeFilter || !this._typeFilter.size) return true;
+    return this._typeFilter.has(this.fileKindOf(it));
   }
 
   /* 把卡片圓角寫成 .gn-root 上的 CSS 變數（滑桿與每次重畫都會呼叫）。
@@ -3861,6 +3888,23 @@ class GalleryView extends ItemView {
     requestAnimationFrame(() => { apply(); this._treeScrollLock = false; });
   }
 
+  /* 文件类型芯片（2026-11-23）：与标签共用同一条内嵌筛选列。
+     多选＝OR；再点一次取消。点完只重绘卡片墙，列本身保留。 */
+  fillTypeChips(body) {
+    body.createSpan('gn-filterbar-label').setText(t('File type'));
+    for (const key of Object.keys(TYPE_FILTERS)) {
+      const chip = body.createDiv('gn-more-chip');
+      chip.toggleClass('gn-more-chip-on', !!(this._typeFilter && this._typeFilter.has(key)));
+      chip.setText(t(TYPE_FILTERS[key]));
+      chip.onclick = () => {
+        if (!this._typeFilter) this._typeFilter = new Set();
+        if (this._typeFilter.has(key)) this._typeFilter.delete(key);
+        else this._typeFilter.add(key);
+        this.rerenderMain();   // 只重绘卡片墙，筛选列保留继续点
+      };
+    }
+  }
+
   /* 標籤面板（2026-08-10 最終版）：**內嵌在右欄、表頭下方、卡片上方**，展開時把卡片往下推。
      沿革：08-01 是右欄底部的常駐浮動面板 → 當天稍早改成工具列按鈕下方的浮層 →
      最後定案內嵌。內嵌的好處是「篩選中」這件事一直看得見，不像浮層收起後只剩一顆亮著的鈕。
@@ -4705,6 +4749,17 @@ class GalleryView extends ItemView {
       this._topCrumbEl = topCtx.createDiv('gn-top-crumb');
       this._topCountEl = topCtx.createSpan('gn-head-count');
       this._topCountEl.style.display = 'none';
+      const filterBtn = btn.filter = this._topFilterBtn = this.mkBarBtn(topRight, 'filter',
+        t('Filter by tag and file type'),
+        { on: !!this._tagOpen || !!(this._tagFilter && this._tagFilter.size) || !!(this._typeFilter && this._typeFilter.size) });
+      filterBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (this._searchQ || this.plugin.state.leftMode === 'tag') return;
+        this._tagOpen = !this._tagOpen;
+        const bar = this._tagbarHost && this._tagbarHost.querySelector('.gn-tagbar');
+        if (bar) bar.toggleClass('gn-tagbar-open', !!this._tagOpen);
+        this.syncTopFilterButtons();
+      };
       const tagBtn = this._topTagBtn = this.mkBarBtn(topRight, 'tags', t('Tags in this folder'), { cls: 'gn-top-tag', key: 'tags' });
       tagBtn.onclick = (e) => {
         e.stopPropagation();
@@ -4713,11 +4768,12 @@ class GalleryView extends ItemView {
         this._tagOpen = !this._tagOpen;
         const bar = this._tagbarHost && this._tagbarHost.querySelector('.gn-tagbar');
         if (bar) bar.toggleClass('gn-tagbar-open', !!this._tagOpen);
-        this.syncTopTagButton();
+        this.syncTopFilterButtons();
       };
       topRight.appendChild(topCtx);
+      topRight.appendChild(filterBtn);
       topRight.appendChild(tagBtn);
-      this.syncTopTagButton();
+      this.syncTopFilterButtons();
       this.buildSearchBox(topRight, { bar: true });
       for (const k of ['sort', 'more', 'new']) if (btn[k]) topRight.appendChild(btn[k]);
     }
@@ -5004,7 +5060,7 @@ class GalleryView extends ItemView {
           this.path = it.folder.path;
           state.lastPath = it.folder.path;
           this._focusTreeSel = it.folder.path;   // 選後聚焦此列，讓 Enter 能改名
-          this._tagFilter = new Set();           // 換資料夾 → 清掉上一夾的標籤篩選
+          this.resetCardFilters();           // 切换文件夹 → 清掉上一个文件夹的标签／类型筛选
           this.plugin.saveState();
           this.render();
           this.gotoCardsMobile();
@@ -5239,7 +5295,7 @@ class GalleryView extends ItemView {
     if (!document.body.classList.contains('is-mobile')) {
       if (this._tagbarHost) this._tagbarHost.empty();
       this.updateTopContext(this.folderAt(this.path), t('Search results'));
-      this.syncTopTagButton();
+      this.syncTopFilterButtons();
       if (this._topCountEl) this._topCountEl.style.display = 'none';
     }
     const idx = this.plugin.search;
@@ -6589,6 +6645,21 @@ class GalleryView extends ItemView {
     this.renderWallCrumbs(wrap, folder || this.folderAt(this.path));
     if (modeText) wrap.createSpan('gn-top-mode').setText(modeText);
   }
+  /* 桌面常驻工具栏的“筛选”按钮：仅文件夹墙可用；展开中或任何筛选生效时都要亮。 */
+  syncTopFilterButtons() {
+    const b = this._topFilterBtn;
+    if (b) {
+      const inFolderView = !this._searchOn && this.plugin.state.leftMode !== 'tag';
+      const active = !!this._tagOpen
+        || !!(this._tagFilter && this._tagFilter.size)
+        || !!(this._typeFilter && this._typeFilter.size);
+      b.toggleClass('is-disabled', !inFolderView);
+      b.setAttr('aria-disabled', inFolderView ? 'false' : 'true');
+      b.toggleClass('is-active', inFolderView && active);
+    }
+    this.syncTopTagButton();
+  }
+
   /* 桌機常駐工具列的標籤篩選鈕：跟著目前資料夾/搜尋狀態更新可用性與亮燈。 */
   syncTopTagButton() {
     const b = this._topTagBtn;
@@ -6600,18 +6671,26 @@ class GalleryView extends ItemView {
     b.toggleClass('is-active', ok && (!!this._tagOpen || !!(this._tagFilter && this._tagFilter.size)));
     b.setAttr('aria-label', n ? t('Tags in this folder') + ' · ' + n : t('Tags in this folder'));
   }
-  // 內嵌標籤面板：表頭下方、卡片上方；開合只切 class，不重畫卡片。
+  /* 内嵌筛选列（2026-11-23 由纯标签列扩充）：类型 + 本文件夹标签。
+     即使文件夹没有任何标签也要渲染 —— 类型筛选仍然可用。
+     开合只切 class，不重绘卡片。 */
   renderTagbar(container) {
     const tags = this.folderTags();
-    if (!tags.length) return;
     const bar = container.createDiv('gn-tagbar');
     bar.toggleClass('gn-tagbar-open', !!this._tagOpen);
     const inner = bar.createDiv('gn-tagbar-inner');
-    this.fillTagChips(inner, tags);
-    if (this._tagFilter && this._tagFilter.size) {
+    this.fillTypeChips(inner);
+    if (tags.length) {
+      inner.createSpan('gn-filterbar-sep');
+      this.fillTagChips(inner, tags);
+    }
+    const active = !!(this._tagFilter && this._tagFilter.size)
+      || !!(this._typeFilter && this._typeFilter.size);
+    if (active) {
       const clear = inner.createDiv('gn-tagbar-clear');
       clear.setText(t('Clear'));
-      clear.onclick = () => { this._tagFilter = new Set(); this.rerenderMain(); };
+      clear.setAttr('aria-label', t('Clear filters'));
+      clear.onclick = () => { this.resetCardFilters(); this.rerenderMain(); };
     }
   }
 
@@ -6665,6 +6744,7 @@ class GalleryView extends ItemView {
         const nTags = this.folderTags().length;
         head.addClass('gn-head-has-acts');
         const filtering = !!(this._tagFilter && this._tagFilter.size);
+        const typeFiltering = !!(this._typeFilter && this._typeFilter.size);
         const tagsBtn = this.mkBarBtn(acts, 'tags',
           nTags ? t('Tags in this folder') + ' · ' + nTags : t('Tags in this folder'),
           { on: filtering || !!this._tagOpen, disabled: !nTags, cls: 'gn-head-btn', key: 'tags' });
@@ -6674,6 +6754,20 @@ class GalleryView extends ItemView {
           const bar = this._main && this._main.querySelector('.gn-tagbar');
           if (bar) bar.toggleClass('gn-tagbar-open', !!this._tagOpen);
           tagsBtn.toggleClass('is-active', !!this._tagOpen || !!this._tagFilter.size);
+          const fb = this._main && this._main.querySelector('.gn-head-btn[data-gnk="filter"]');
+          if (fb) fb.toggleClass('is-active', !!this._tagOpen || filtering || typeFiltering);
+        };
+
+        const filterBtn = this.mkBarBtn(acts, 'filter', t('Filter by tag and file type'),
+          { on: !!this._tagOpen || filtering || typeFiltering, cls: 'gn-head-btn', key: 'filter' });
+        filterBtn.onclick = (e) => {
+          e.stopPropagation();
+          this._tagOpen = !this._tagOpen;
+          const bar = this._main && this._main.querySelector('.gn-tagbar');
+          if (bar) bar.toggleClass('gn-tagbar-open', !!this._tagOpen);
+          filterBtn.toggleClass('is-active', !!this._tagOpen || filtering || typeFiltering);
+          const tb = this._main && this._main.querySelector('.gn-head-btn[data-gnk="tags"]');
+          if (tb) tb.toggleClass('is-active', (!!this._tagOpen || filtering) && nTags > 0);
         };
 
         const own = this.ownLayout();
@@ -6723,16 +6817,16 @@ class GalleryView extends ItemView {
           this.render();
         };
 
-        if (nTags) this.renderTagbar(container);
+        this.renderTagbar(container);   // 没有标签也要渲染：类型筛选仍可用
       }
     } else {
       /* 桌機：路徑、數量、標籤鈕都在常駐工具列；牆內不再有會捲走的表頭。 */
       if (this._tagbarHost) this._tagbarHost.empty();
       this.updateTopContext(folder || this.folderAt(this.path),
         this._searchQ ? t('Search results') : (state.leftMode === 'tag' ? headText : ''));
-      this.syncTopTagButton();
+      this.syncTopFilterButtons();
       if (this._tagbarHost && !headOverride && folder && state.leftMode !== 'tag') {
-        if (this.folderTags().length) this.renderTagbar(this._tagbarHost);
+        this.renderTagbar(this._tagbarHost);
       }
     }
 
@@ -6740,11 +6834,23 @@ class GalleryView extends ItemView {
     //   多選標籤時字串會很長（#a #b #c ✕），塞在工具列會把麵包屑擠爆＝破格。
     //   獨立一列後可自行換行（flex-wrap），長度再長也不影響工具列。
     const tagFilterOn = !filesOverride && this._tagFilter && this._tagFilter.size;
-    if (flatten || tagFilterOn) {
+    const typeFilterOn = !filesOverride && this._typeFilter && this._typeFilter.size;
+    if (flatten || tagFilterOn || typeFilterOn) {
       const chips = container.createDiv('gn-wall-chips');
       if (flatten) chips.createSpan({ cls: 'gn-head-flat', text: t('Including subfolders') });
-      // 標籤篩選中 → **每個標籤各自一顆膠囊**，點哪顆就只移除那一個篩選條件
+      // 筛选中 → **每个条件各自一颗胶囊**，点哪颗就只移除那一个筛选条件
       // （2026-07-20 改：原本全部標籤擠成一顆、一點就整組清空，無法逐一取消）
+      if (typeFilterOn) {
+        for (const key of [...this._typeFilter]) {
+          const label = t(TYPE_FILTERS[key] || 'Other');
+          const chip = chips.createSpan({ cls: 'gn-head-flat gn-head-tag', text: label + ' ✕' });
+          chip.setAttr('title', t('Remove this filter'));
+          chip.onclick = () => {
+            this._typeFilter.delete(key);
+            this.rerenderMain();
+          };
+        }
+      }
       if (tagFilterOn) {
         for (const tag of [...this._tagFilter]) {
           const chip = chips.createSpan({ cls: 'gn-head-flat gn-head-tag', text: '#' + tag + ' ✕' });
@@ -6760,7 +6866,8 @@ class GalleryView extends ItemView {
     let items = filesOverride
       ? filesOverride.map((f) => itemFromFile(app, f))
       : (flatten ? notesInDeep(app, folder, new Set(this.plugin.state.hiddenFolders || [])) : notesIn(app, folder));
-    // 本夾標籤篩選（「更多」面板的膠囊；多選＝OR，含子標籤）
+    // 本文件夹筛选：类型与标签各自多选 OR，两者之间 AND
+    if (typeFilterOn) items = items.filter((it) => this.matchTypeFilter(it));
     if (tagFilterOn) items = items.filter((it) => this.matchTagFilter(it.file));
     const sorted = keepOrder ? items : sortItems(items, this.plugin.state.sort || 'new');
     // 釘選的卡片浮到最前（feature 4），其餘維持原排序
