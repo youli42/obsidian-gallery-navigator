@@ -4367,7 +4367,7 @@ class GalleryView extends ItemView {
     const wrap = host.createDiv(bar ? 'gn-top-search' : 'gn-search-row');
     if (bar) setIcon(wrap.createDiv('gn-top-search-ic'), 'search');
     const input = wrap.createEl('input', { type: 'search', cls: bar ? 'gn-top-search-input' : 'gn-search-input' });
-    input.placeholder = t('Search full text…');
+    input.placeholder = t('Search full text or file name…');
     input.value = this._searchQ || '';
 
     const clear = wrap.createDiv(bar ? 'gn-top-search-clear' : 'gn-search-clear');
@@ -5301,10 +5301,22 @@ class GalleryView extends ItemView {
     const idx = this.plugin.search;
     if (!idx.ready) { main.createDiv('gn-empty').setText(t('Building index…')); return; }
     const hits = idx.search(this._searchQ, 0);          // 0 = 不設上限（卡牆本來就懶載入）
-    const files = hits
-      .filter((h) => this.showHidden || !this.plugin.isHiddenPath(h.path))   // 跳過隱藏資料夾（眼睛開啟時照常顯示）
-      .map((h) => this.app.vault.getAbstractFileByPath(h.path))
-      .filter((f) => f instanceof TFile);
+    /* 文件名命中优先：索引不收无标签的图片／影片，只靠 BM25 会漏掉它们。
+       同一路径只留一份；全文命中接在后面，维持原本的相关性排序。 */
+    const files = [];
+    const seen = new Set();
+    for (const f of this.plugin.searchFilenames(this._searchQ)) {
+      if (!this.showHidden && this.plugin.isHiddenPath(f.path)) continue;
+      if (seen.has(f.path)) continue;
+      seen.add(f.path);
+      files.push(f);
+    }
+    for (const h of hits) {
+      if (seen.has(h.path)) continue;                                   // 文件名已命中
+      if (!this.showHidden && this.plugin.isHiddenPath(h.path)) continue;   // 跳过隐藏文件夹（眼睛开启时照常显示）
+      const f = this.app.vault.getAbstractFileByPath(h.path);
+      if (f instanceof TFile) { seen.add(h.path); files.push(f); }
+    }
     this.renderNoteWall(
       main, null, files,
       t('Search "{{q}}" · {{n}} results', { q: this._searchQ, n: files.length }),
@@ -7346,7 +7358,7 @@ class GnSearchModal extends SuggestModal {
   constructor(app, plugin) {
     super(app);
     this.plugin = plugin;
-    this.setPlaceholder(t('Search notes and PDFs (full-text)…'));
+    this.setPlaceholder(t('Search full text or file name…'));
     this.emptyStateText = t('No matching notes');
     this.limit = 30;
     this.modalEl.addClass('gn-search-modal');
@@ -7373,7 +7385,20 @@ class GnSearchModal extends SuggestModal {
     if (!idx.ready) await idx.ensureReady();   // 惰性建索引（首次 ~1 秒，之後增量）
     if (seq !== this._seq) return [];
     // 多撈一些再過濾隱藏資料夾，湊滿 30 筆
-    return idx.search(q, 90).filter((h) => !this.plugin.isHiddenPath(h.path)).slice(0, 30);
+    /* 文件名命中优先，再接全文命中；同一路径只留一份。 */
+    const nameHits = this.plugin.searchFilenames(q, 15)
+      .filter((f) => !this.plugin.isHiddenPath(f.path))
+      .map((f) => ({ path: f.path, title: f.basename, score: 0 }));
+    const textHits = idx.search(q, 90).filter((h) => !this.plugin.isHiddenPath(h.path));
+    const seen = new Set();
+    const merged = [];
+    for (const h of nameHits) { seen.add(h.path); merged.push(h); }
+    for (const h of textHits) {
+      if (seen.has(h.path)) continue;
+      seen.add(h.path);
+      merged.push(h);
+    }
+    return merged.slice(0, 30);
   }
 
   renderSuggestion(hit, el) {
@@ -7909,6 +7934,31 @@ class GalleryPlugin extends Plugin {
        手機讀寫比「直接重建（0.6 秒）」還慢，而且要處理版本/失效/髒資料。
        → 惰性建立（第一次搜尋才建）＋ 增量更新，一個 session 只建一次。 */
     this.search = new GnSearchIndex(this.app, this);
+
+    /* 按文件名搜索（2026-11-23）：全文索引只收 md / PDF / 有标签的附件，
+       图片、影片等没标签的文件搜不到。这里直接扫 vault 的文件名补上。
+       排序：完全相同 > 前缀 > 包含；同层短文件名优先，再按名称排序。
+       返回 TFile[]；隐藏文件夹由调用端过滤（各视图的 showHidden 不同）。 */
+    this.searchFilenames = (q, limit = 0) => {
+      const needle = String(q || '').trim().toLowerCase();
+      if (!needle) return [];
+      const out = [];
+      for (const f of this.app.vault.getFiles()) {
+        const name = f.basename.toLowerCase();
+        let rank = 0;
+        if (name === needle) rank = 4;
+        else if (name.startsWith(needle)) rank = 3;
+        else if (name.includes(needle)) rank = 2;
+        if (!rank) continue;
+        out.push({ file: f, rank, len: name.length, name });
+      }
+      out.sort((a, b) => b.rank - a.rank
+        || a.len - b.len
+        || a.name.localeCompare(b.name)
+        || a.file.path.localeCompare(b.file.path));
+      const files = out.map((x) => x.file);
+      return limit > 0 ? files.slice(0, limit) : files;
+    };
 
     // 增量更新：改一篇只重索引那一篇（幾 ms），索引全程保持新鮮
     this.registerEvent(this.app.vault.on('modify', (f) => {

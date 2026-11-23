@@ -80,6 +80,7 @@ const ZH_TW = {
   'Copy links': '複製連結',
   '{{n}} items': '{{n}} 項',
   'Search full text…': '搜尋全文…',
+  'Search full text or file name…': '搜尋全文或檔名…',
 
   // ── 設定頁 ──
   'Language': '語言',
@@ -427,6 +428,7 @@ const ZH_CN = {
   'Copy links': '复制链接',
   '{{n}} items': '{{n}} 项',
   'Search full text…': '全文搜索…',
+  'Search full text or file name…': '搜索全文或文件名…',
 
   // ── 设置页 ──
   'Language': '语言',
