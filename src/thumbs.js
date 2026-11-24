@@ -30,7 +30,9 @@
 
 const { TFile } = require('obsidian');
 
-const THUMB_MAX = 640;              // 縮圖長邊上限（px）。卡片最寬約 300，2 倍給高 DPI 螢幕用
+/* 縮圖長邊上限（px）。卡片最寬約 300px，480 對高 DPI 螢幕仍足夠（畫質無明顯差異），
+   而解碼記憶體按面積算從 640² 降到 480²（約省 44%）。改這個值會自動換新檔名，見 thumbName。 */
+const THUMB_MAX = 480;
 const THUMB_QUALITY = 0.82;         // JPEG 品質：0.82 在卡片尺寸下肉眼無差，檔案又夠小
 const SKIP_UNDER_BYTES = 200 * 1024; // 小於此大小的圖不處理（省下來的不值得一次解碼＋寫檔）
 const SKIP_EXT = /\.(gif|svg)$/i;    // GIF 會失去動畫、SVG 是向量，都不轉
@@ -40,7 +42,7 @@ const IS_IMG = /\.(png|jpe?g|webp|bmp|avif)$/i;
    ⚠️ 原本是單一 32-bit djb2，數千張圖的規模下生日碰撞約千分之一量級 ——
       撞到就是兩個不同路徑共用同一個檔名，互相覆蓋、卡片顯示錯圖（很難查的那種 bug）。
       改成 cyrb53 風格的雙 32-bit 串接（等效 64-bit），碰撞機率降到可忽略。
-   換 hash 不會讓既有縮圖失效：索引存的是實際檔名（見 urlFor），不是每次重算，
+   換 hash 本身不會讓既有縮圖失效：索引存的是實際檔名（見 urlFor），不是每次重算，
    只有之後新產生的縮圖採用新命名。 */
 function hash64(s) {
   let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
@@ -54,6 +56,14 @@ function hash64(s) {
   return (h2 >>> 0).toString(36) + (h1 >>> 0).toString(36);
 }
 
+/* 縮圖檔名：把「路徑 + THUMB_MAX」一起丟進 hash。
+   ⚠️ 尺寸一定要進 hash。索引存的是實際檔名，只改 THUMB_MAX 而檔名不變的話，
+   已存在的舊尺寸縮圖會一直命中，永遠不會重做（mtime 沒變 → 不算過期）。
+   改了尺寸就等於換了檔名 → 自然重做一份；舊尺寸的檔案留成孤兒，由 prune 回收。 */
+function thumbName(path) {
+  return hash64(path + '|' + THUMB_MAX) + '.jpg';
+}
+
 class ThumbCache {
   constructor(plugin) {
     this.plugin = plugin;
@@ -65,6 +75,7 @@ class ThumbCache {
     this.failed = new Set();  // 失敗過的路徑：本次工作階段不再重試，免得無限重排
     this._saveT = 0;
     this._dirty = 0;          // 有未落地的索引變更（flush 用）
+    this._loaded = false;     // 索引載入成功才允許 prune 掃孤兒檔（見 prune）
     // 手機記憶體更緊，一次只做一張；桌機 2 張仍遠低於「全部一起解碼」
     this.concurrency = document.body.classList.contains('is-mobile') ? 1 : 2;
   }
@@ -78,6 +89,9 @@ class ThumbCache {
       if (await a.exists(this.indexPath())) {
         this.index = JSON.parse(await a.read(this.indexPath())) || {};
       }
+      // 含「還沒有索引檔」：真的沒東西可掃。載入／解析失敗則維持 false，
+      // prune 寧可不動手 —— 空的索引配上掃孤兒檔，等於把整個快取刪光。
+      this._loaded = true;
     } catch (e) { this.index = {}; }
   }
 
@@ -115,10 +129,13 @@ class ThumbCache {
   }
 
   /* 已有可用縮圖 → 回傳資源路徑；沒有 → null。
-     mtime 不符代表原圖被換過，視為沒有（會重做）。 */
+     mtime 不符代表原圖被換過，視為沒有（會重做）。
+     檔名不符則是「產生它的參數（尺寸／命名規則）變過」，同樣視為沒有：
+     否則改過 THUMB_MAX 之後，舊尺寸的縮圖會永遠命中、永遠不會重做。 */
   urlFor(file) {
     const rec = this.index[file.path];
     if (!rec || rec[1] !== file.stat.mtime) return null;
+    if (rec[0] !== thumbName(file.path)) return null;
     return this.app.vault.adapter.getResourcePath(this.dir() + '/' + rec[0]);
   }
 
@@ -198,7 +215,7 @@ class ThumbCache {
          索引可能過期（同路徑換成另一張圖，長寬比要等下次載入才校正）；
          若索引誤報成大圖而實際很小，resizeWidth 會把它**放大**成糊掉的縮圖，
          而且會一直留在縮圖快取裡。留 2 倍的安全邊界：
-         真正吃記憶體的是幾千像素的原圖，640~1280 那段解碼成本本來就不高。 */
+         真正吃記憶體的是幾千像素的原圖，480~960 那段解碼成本本來就不高。 */
       const trustDims = kw && kh && Math.max(kw, kh) >= THUMB_MAX * 2;
       if (trustDims) {
         // 只給一邊，另一邊由瀏覽器等比推算（給兩邊會在尺寸有出入時被拉變形）
@@ -216,7 +233,7 @@ class ThumbCache {
       if (!iw || !ih) throw new Error('bad bitmap');
 
       // 已經夠小 → 不值得存一份幾乎一樣大的副本，登記跳過即可
-      // （走 resize 解碼時 bmp 本來就是 640，不能拿來當「原圖很小」的判斷）
+      // （走 resize 解碼時 bmp 本來就是 480，不能拿來當「原圖很小」的判斷）
       if (Math.max(iw, ih) <= THUMB_MAX && !trustDims) {
         bmp.close();
         bmp = null;
@@ -243,7 +260,7 @@ class ThumbCache {
       if (!outBlob) throw new Error('toBlob failed');
 
       const bytes = await outBlob.arrayBuffer();
-      const fname = hash64(file.path) + '.jpg';
+      const fname = thumbName(file.path);
       if (!(await a.exists(this.dir()))) await a.mkdir(this.dir());
       await a.writeBinary(this.dir() + '/' + fname, bytes);
 
@@ -258,8 +275,12 @@ class ThumbCache {
     }
   }
 
-  /* 原圖已刪除的縮圖清掉。手動觸發（設定頁），不自動跑。 */
+  /* 清掉沒用的縮圖：原圖已刪除的，加上「目錄裡有、索引沒引用」的孤兒檔
+     （換過 THUMB_MAX 之後，舊尺寸的那批就屬這一類）。
+     只在設定頁手動清快取、以及啟動後那一次閒置清掃時跑，不隨捲動觸發。
+     ⚠️ 索引沒載入成功就整個不動：空索引配上掃孤兒檔，等於一次把整個快取刪光。 */
   async prune() {
+    if (!this._loaded) return 0;
     const a = this.app.vault.adapter;
     let removed = 0;
     for (const p of Object.keys(this.index)) {
@@ -267,6 +288,22 @@ class ThumbCache {
       try { await a.remove(this.dir() + '/' + this.index[p][0]); } catch (e) {}
       delete this.index[p];
       removed++;
+    }
+    /* 孤兒檔只在確定沒人在寫入時掃：剛寫進目錄、索引還沒登記的那張會被誤判成孤兒，
+       刪掉之後索引仍指著它 → 卡片拿到壞掉的路徑。忙碌中就留給下一輪。
+       取捨跟封面快取一樣：多留一份只是佔空間，刪錯一張要重新生成。 */
+    if (!this.busy && !this.pending.size) {
+      try {
+        if (await a.exists(this.dir())) {
+          const list = await a.list(this.dir());
+          const known = new Set(Object.keys(this.index).map((p) => this.index[p][0]));
+          for (const f of (list.files || [])) {
+            const name = f.split('/').pop();
+            if (!name || name === 'index.json' || known.has(name)) continue;
+            try { await a.remove(f); removed++; } catch (e) {}
+          }
+        }
+      } catch (e) {}
     }
     if (removed) this.save();
     return removed;
