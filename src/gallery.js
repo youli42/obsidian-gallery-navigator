@@ -450,6 +450,7 @@ class SwapImageModal extends Modal {
 /* ===== 常數 / 資料邏輯 ===== */
 
 const VIEW_TYPE = 'gallery-navigator';
+
 const IMG_EXT = /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i;
 /* “文字”类型桶：只有真正的文本文档。PDF / Canvas / Base 等归入“其他”。 */
 const TEXT_EXT = new Set(['md', 'txt']);
@@ -1584,19 +1585,19 @@ class GalleryView extends ItemView {
          筆記沒有全選，反而整面牆的卡片被選起來（之後拖任一張就是整批搬移）。 */
       if (e.target && e.target.isContentEditable) return;
       if ((e.metaKey || e.ctrlKey) && (e.key === 'a' || e.key === 'A')) {
-        if (this._hover && this._cardOrder && this._cardOrder.length) {
+        if (this.hasPointerOrFocus() && this._cardOrder && this._cardOrder.length) {
           e.preventDefault();
           this.selectAll();
         }
-      } else if (e.key === 'Escape' && this._hover && this.selected && this.selected.size) {
-        // 跟 Cmd+A 一樣要求滑鼠在本視圖上：否則在別的面板按 Esc 會順手清掉畫廊的多選
+      } else if (e.key === 'Escape' && this.hasPointerOrFocus() && this.selected && this.selected.size) {
+        // 跟 Cmd+A 一樣要求使用者在這個視圖上：否則在別的面板按 Esc 會順手清掉畫廊的多選
         this.clearSel();
       } else if (e.key === 'F2') {
         /* F2 ＝ 重新命名（Windows 資源管理器／macOS Finder 的慣例鍵，2026-11-24）。
            跟 Cmd+A／Esc 一樣要求滑鼠在本視圖上：游標停在筆記編輯器裡按 F2，
            不該去改畫廊上「上次選取」的那個檔案。
            沒有選取就完全不插手 —— 事件原樣放行，交給系統或其他外掛。 */
-        if (!this._hover) return;
+        if (!this.hasPointerOrFocus()) return;
         if (!this.selected.size && !this.selFolders.size) return;
         e.preventDefault();
         this.renameSelected();
@@ -5866,6 +5867,21 @@ class GalleryView extends ItemView {
     }
     this.updateSelBar();
   }
+  /* 使用者現在是不是在操作這個視圖？（2026-11-24）
+     `_hover` 是 mouseenter/mouseleave 維護的布林值，切分頁或重畫時可能被
+     一次 mouseleave 永久打成 false（滑鼠其實還在上面，只是沒有再移動）。
+     所以再加兩個即時判斷：CSS :hover（不受事件遺漏影響）與「本視圖就是 active leaf」。
+     F2／Cmd+A／Esc 都改用它 —— 既不誤觸別的面板，也不會靜默失效。 */
+  hasPointerOrFocus() {
+    if (this._hover) return true;
+    try { if (this.contentEl && this.contentEl.matches(':hover')) return true; } catch (e) {}
+    try {
+      const l = this.app.workspace.activeLeaf;
+      if (l && l.view === this) return true;
+    } catch (e) {}
+    return false;
+  }
+
   clearSel() {
     for (const p of this.selected) {
       for (const el of this.cardElsFor(p)) el.removeClass('gn-card-selected');
