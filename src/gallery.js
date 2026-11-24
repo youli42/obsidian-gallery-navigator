@@ -589,6 +589,9 @@ function hashStr(s) {
 }
 
 // 解析封面：frontmatter.cover → 後備:內文第一張嵌入圖。支援 ![[...]]、外部網址、去隱形字元。
+/* 回傳 { src, file }（沒有封面時 null）：src 是資源路徑，file 是封面指向的 vault 檔案。
+   file 是給縮圖管線用的（見 setCardImage）——以前這裡解析出 TFile 卻只用它換 resourcePath
+   就丟掉，卡片牆於是只能載原圖。外部 http 封面沒有檔案，file 是 null。 */
 function coverSrc(app, cache, path) {
   let raw = cache && cache.frontmatter ? cache.frontmatter.cover : null;
   if (raw == null) {
@@ -598,13 +601,13 @@ function coverSrc(app, cache, path) {
     if (raw == null) return null;
   }
   let s = String(raw).replace(INVISIBLE, '').trim();
-  if (/^https?:\/\//i.test(s)) return s;
+  if (/^https?:\/\//i.test(s)) return { src: s, file: null };
   const m = s.match(/!?\[\[([^\]]+)\]\]/);
   if (m) s = m[1];
   s = s.split('|')[0].split('#')[0].trim();
   if (!s) return null;
   const f = app.metadataCache.getFirstLinkpathDest(s, path);
-  return f ? app.vault.getResourcePath(f) : null;
+  return f ? { src: app.vault.getResourcePath(f), file: f } : null;
 }
 
 /* ===== 封面解析快取（2026-08-05）=====
@@ -617,22 +620,27 @@ function coverSrc(app, cache, path) {
        光靠 mtime 比對會把過期結果永久黏住）
      • vault create / delete / rename → 整份清掉（封面可能指向別的檔案，
        那個檔案被改名/刪除時 md 自己的 mtime 不會變） */
-const _coverCache = new Map();   // path → { mtime, src }
+const _coverCache = new Map();   // path → { mtime, src, file }
 function invalidateCoverCache(path) {
   if (path) _coverCache.delete(path); else _coverCache.clear();
 }
+/* 回傳 { src, file }：src 是資源路徑，file 是封面指向的 TFile（沒有就 null）。
+   file 只給縮圖管線用（見 setCardImage），其他呼叫端照舊只讀 src。 */
 function coverFor(app, f, isImg, isVideo) {
   const hit = _coverCache.get(f.path);
-  if (hit && hit.mtime === f.stat.mtime) return hit.src;
+  if (hit && hit.mtime === f.stat.mtime) return hit;
   /* 圖片檔本身即封面；影片找同目錄的同名封面圖（見 videocover.js）；其餘只有 md 有封面。 */
-  const src = isImg
-    ? app.vault.getResourcePath(f)
+  const info = isImg
+    ? { src: app.vault.getResourcePath(f), file: f }
+    // 同名封面圖也解析得到 TFile，但影片卡這條分支維持原樣（不進縮圖管線）
     : isVideo
-      ? videoSiblingCover(app, f)
+      ? { src: videoSiblingCover(app, f), file: null }
       : coverSrc(app, app.metadataCache.getFileCache(f), f.path);
+  const src = info ? info.src : null;
+  const file = info ? info.file : null;
   if (_coverCache.size > 20000) _coverCache.clear();   // 上限防呆，成本只是重算一次
-  _coverCache.set(f.path, { mtime: f.stat.mtime, src });
-  return src;
+  _coverCache.set(f.path, { mtime: f.stat.mtime, src, file });
+  return { src, file };
 }
 
 /* ===== Excalidraw 縮圖（2026-11-15）=====
@@ -799,6 +807,9 @@ function itemFromFile(app, f) {
   const it = {
     file: f,
     name: f.basename,
+    /* 封面實際上指向哪個 vault 檔案（外部 http 封面、影片同名封面圖這類沒有 TFile 的
+       情況是 null）。惰性：跟 src 一起在第一次讀取時填上，見下面的 getter。 */
+    coverFile: null,
     ext: (f.extension || '').toLowerCase(),
     isImg,
     isVideo,
@@ -812,10 +823,11 @@ function itemFromFile(app, f) {
     enumerable: true,
     configurable: true,
     get() {
-      const v = coverFor(app, f, isImg, isVideo);
+      const c = coverFor(app, f, isImg, isVideo);
       // 求過一次就把 getter 換成一般欄位，之後連 Map 查詢都省
-      Object.defineProperty(it, 'src', { value: v, writable: true, enumerable: true, configurable: true });
-      return v;
+      Object.defineProperty(it, 'src', { value: c.src, writable: true, enumerable: true, configurable: true });
+      it.coverFile = c.file;   // 順便記下封面檔案（縮圖管線要用），不多花一次解析
+      return c.src;
     },
     set(v) {
       Object.defineProperty(it, 'src', { value: v, writable: true, enumerable: true, configurable: true });
@@ -3717,23 +3729,33 @@ class GalleryView extends ItemView {
 
   /* 決定卡片圖片實際要載入哪一個檔案：縮圖優先，原圖是退路。
      ⚠️ 沒有縮圖時**不先塞原圖再替換**——那樣峰值記憶體跟完全沒做縮圖一樣
-        （見 thumbs.js 設計說明 2）。寧可先留白，縮圖好了再填。 */
+        （見 thumbs.js 設計說明 2）。寧可先留白，縮圖好了再填。
+
+     2026-11-24：筆記卡封面也走同一條管線。以前只有「卡片本身就是圖片檔」才縮，
+     筆記卡的封面一律載原圖 → 1600×900 的封面原圖解碼約 5.8MB/張，而卡片寬只有
+     ~273px，一張封面就吃掉整面牆的預算。改走 thumb-cache 後同一張約 0.9MB。
+     ⚠️ 例外：封面是外部 http 網址（frontmatter cover 用 URL、或 og:image）時沒有
+       TFile，thumbs 無從下手（它也要求 file.stat），維持原圖；影片同名封面圖這條
+       分支也刻意不動（見 coverFor）。
+     ⚠️ applyDim／高度估算一律仍以 it.file 為 key —— 封面是別的檔案，
+        牆的尺寸估算邏輯不跟著換 key。 */
   setCardImage(img, it) {
-    const file = it.file;
+    /* 要顯示的影像檔：卡片本身是圖片 → 它自己；其餘（筆記）→ 封面指向的圖片檔。 */
+    const target = it.isImg ? it.file : (it.coverFile || null);
     const useOriginal = () => {
       this.applyDim(img, it);
       img.src = it.src;
     };
-    // 非圖片檔（md 的封面 / og 圖）與小圖、GIF、SVG：本來就不貴，直接用原圖
-    if (!it.isImg || this.plugin.thumbs.shouldSkip(file)) { useOriginal(); return; }
+    // 沒有可縮的檔案（外部封面）、小圖、GIF、SVG：本來就不貴，直接用原圖
+    if (!target || this.plugin.thumbs.shouldSkip(target)) { useOriginal(); return; }
 
-    const ready = this.plugin.thumbs.urlFor(file);
+    const ready = this.plugin.thumbs.urlFor(target);
     if (ready) { this.applyDim(img, it); img.src = ready; return; }
 
     // 先用長寬比佔好高度（若已知），避免縮圖填入時整牆重排
     this.applyDim(img, it);
     img.addClass('gn-img-pending');
-    this.plugin.thumbs.request(file, (url) => {
+    this.plugin.thumbs.request(target, (url) => {
       if (!img.isConnected) return;                 // 已經捲走 / 重畫過了
       img.removeClass('gn-img-pending');
       img.src = url || it.src;                      // 做不出縮圖 → 退回原圖
@@ -7579,7 +7601,7 @@ class GnSearchModal extends SuggestModal {
       const src = IMG_EXT.test(f.path)
         ? this.app.vault.getResourcePath(f)
         : (f.extension === 'md'
-          ? coverSrc(this.app, this.app.metadataCache.getFileCache(f), f.path)
+          ? (coverSrc(this.app, this.app.metadataCache.getFileCache(f), f.path) || {}).src
           : (VIDEO_EXT.test(f.path) ? videoSiblingCover(this.app, f) : null));   // 影片只認同名封面圖，不抽幀
       if (src) {
         const im = el.createEl('img', { cls: 'gn-search-sug-thumb' });
