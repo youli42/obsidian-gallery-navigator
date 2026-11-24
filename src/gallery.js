@@ -1463,6 +1463,7 @@ class GalleryView extends ItemView {
   onResize() {
     this.plugin.syncDrawerSkin();   // 抽屜開合／轉向 → 重算抽屜外觀（手機）
     const shown = this.contentEl && this.contentEl.clientWidth > 0;
+    if (shown) this.flushPendingScroll();   // 分頁重新顯示 → 補套看不到時暫存的捲動位置
     if (this._needsRender && shown) {
       this._needsRender = false;
       this.render();
@@ -1512,6 +1513,9 @@ class GalleryView extends ItemView {
        關閉沒有伴隨 file-open（例如關掉最後一個分頁）→ 丟掉守衛，
        免得吞掉使用者下一次真正的導覽。 */
     this.registerEvent(this.app.workspace.on('layout-change', () => {
+      /* 切分頁不一定會觸發 onResize（同尺寸換頁），所以這裡也補一次：
+         分頁重新顯示時把「看不見時暫存」的捲動位置套回去（見 flushPendingScroll）。 */
+      this.flushPendingScroll();
       const rec = this.plugin._lastOpenFromGallery;
       if (!rec) return;
       const stillThere = rec.leaf ? this.isLeafAlive(rec.leaf) : this.isFileOpenInAnyLeaf(rec.path);
@@ -3882,6 +3886,43 @@ class GalleryView extends ItemView {
     }, { passive: true });
   }
 
+  /* 畫廊現在「真的看得到」嗎？（2026-11-24）
+     ⚠️ 分頁被切走時 Obsidian 把 leaf 設成 display:none，內容尺寸變 0 →
+        瀏覽器把 scrollTop 夾成 0，所以此刻讀 el.scrollTop 拿到的是 **0，不是使用者的捲動位置**。
+        把這個 0 當成使用者的位置寫進記憶，回到畫廊時左樹／卡片牆就會「跳回最上面」
+        （回報症狀：打開一張圖片、Ctrl+W 關掉它之後，左樹像是往上跳了一層）。
+        因此看不見時一律不記錄、也不套用捲動位置，等真的顯示出來再由 flushPendingScroll() 補。 */
+  paneVisible() {
+    const el = this.contentEl;
+    return !!(el && el.isConnected && el.clientWidth > 0 && el.clientHeight > 0);
+  }
+
+  /* 顯示出來之後，把「看不見時暫存」的捲動位置套回去（左樹＋卡片牆）。 */
+  flushPendingScroll() {
+    if (!this.paneVisible()) return;
+    const treeTop = this._treeScrollPending;
+    if (treeTop != null) {
+      this._treeScrollPending = null;
+      const el = this._treeScroll;
+      if (el) {
+        const apply = () => {
+          if (!el.isConnected || !this.paneVisible()) return;
+          el.scrollTop = Math.max(0, Math.min(treeTop, el.scrollHeight - el.clientHeight));
+        };
+        apply();
+        requestAnimationFrame(apply);
+      }
+    }
+    const savedMain = this._mainScrollPending;
+    if (savedMain) {
+      this._mainScrollPending = null;
+      if (savedMain.key === this.mainScrollKey()) {
+        this._mainScrollSaved = savedMain;
+        this.restoreMainScroll();
+      }
+    }
+  }
+
   // ── 左欄捲動位置記憶（資料夾/標籤各記一份，存進 data.json 跨工作階段） ──
   // 為何需要：render() 會 contentEl.empty() 重建左欄，treeScroll.empty() 也會把內容高度歸零，
   // 兩者都讓 scrollTop 被夾回 0 → 點資料夾就「跳回頂端」。
@@ -3897,6 +3938,7 @@ class GalleryView extends ItemView {
   saveTreeScroll() {
     const el = this._treeScroll;
     if (!el || !el.isConnected || this._treeScrollLock) return;
+    if (!this.paneVisible()) return;   // 看不見時讀到的是 0，不是使用者的捲動（見 paneVisible）
     this.treeScrollStore()[this.treeScrollKey()] = el.scrollTop;
     clearTimeout(this._treeScrollT);
     this._treeScrollT = setTimeout(() => this.plugin.saveState(), 500);   // 去抖寫檔
@@ -3907,6 +3949,14 @@ class GalleryView extends ItemView {
     const el = this._treeScroll;
     if (!el) { this._treeScrollLock = false; return; }
     const top = this.treeScrollStore()[this.treeScrollKey()] || 0;
+    /* 看不見時先記著：此刻 el 高度是 0，設 scrollTop 只會被夾成 0（順便把使用者原本的位置毀掉），
+       等顯示出來再由 flushPendingScroll() 套上。 */
+    if (!this.paneVisible()) {
+      this._treeScrollPending = top;
+      this._treeScrollLock = false;
+      return;
+    }
+    this._treeScrollPending = null;
     const apply = () => {
       if (!el.isConnected) return;
       el.scrollTop = Math.max(0, Math.min(top, el.scrollHeight - el.clientHeight));
@@ -3994,7 +4044,8 @@ class GalleryView extends ItemView {
   // 只重畫左樹（展開/收合/最愛/資料夾配色用）；沒左樹快取就退回整頁
   refreshTree() {
     if (this._treeScroll && this._treeScroll.isConnected && this._buildTree) {
-      this.treeScrollStore()[this.treeScrollKey()] = this._treeScroll.scrollTop;   // 清空前先記住
+      // 清空前先記住（看不見時讀到的是 0 → 不能寫進去，見 paneVisible）
+      if (this.paneVisible()) this.treeScrollStore()[this.treeScrollKey()] = this._treeScroll.scrollTop;
       this._treeScrollLock = true;
       const before = this.treeSnapshot();   // 動畫：重建前先記位置
       this._treeScroll.empty();
@@ -4478,12 +4529,13 @@ class GalleryView extends ItemView {
     this.closeMorePopover();
     this.closeListPopover();
     // 整頁重畫會丟掉左欄捲動位置 → 清空前先記下來，_buildTree() 結尾再還原
-    if (this._treeScroll && this._treeScroll.isConnected) {
+    // 看不見時讀到的是 0（分頁被切走 → 高度 0），不能寫進記憶，見 paneVisible
+    if (this._treeScroll && this._treeScroll.isConnected && this.paneVisible()) {
       this.treeScrollStore()[this.treeScrollKey()] = this._treeScroll.scrollTop;
     }
     // 右欄卡片牆的捲動位置也記下來：同一面牆重畫時還原。
     // 典型場景：拖曳卡片搬到別的資料夾 → rename 事件 → refreshViews 整頁重畫 → 沒這段會跳回頂部。
-    if (this._main && this._main.isConnected) {
+    if (this._main && this._main.isConnected && this.paneVisible()) {
       // ⚠️ 用 _mainWallKey（畫面上那面牆的身分），不要當場算 mainScrollKey()
       //    —— this.path 可能已經被 syncToFile 改成新資料夾了，見 renderMainContent 的說明
       this._mainScrollSaved = { key: this._mainWallKey, top: this._main.scrollTop };
@@ -5252,6 +5304,8 @@ class GalleryView extends ItemView {
     const saved = this._mainScrollSaved;
     const main = this._main;
     if (!saved || !main || !saved.top || saved.key !== this.mainScrollKey()) return;
+    // 看不見時 scrollTop 會被夾成 0（同 paneVisible 的說明）→ 先存著，顯示出來再套
+    if (!this.paneVisible()) { this._mainScrollPending = saved; return; }
     /* 記下 stop：同步定位（setActiveCard）要能把這個還原迴圈掐掉。
        兩者都在改同一個 scrollTop，同時跑的話後喊的不一定贏 —— 還原迴圈會持續重套。 */
     this._restoreStop = this.settleScroll(() => {
@@ -5314,7 +5368,7 @@ class GalleryView extends ItemView {
     if (!this._main) { this.render(); return; }
     // 與 renderInner 一致，一律用 _mainWallKey（畫面上那面牆的身分）。
     // 這條路徑 this.path 不會變、當場算也對，但兩處寫法一致才不會有人只改一邊。
-    this._mainScrollSaved = { key: this._mainWallKey, top: this._main.scrollTop };
+    if (this.paneVisible()) this._mainScrollSaved = { key: this._mainWallKey, top: this._main.scrollTop };
     this.rerenderMain();
     this.restoreMainScroll();
   }
