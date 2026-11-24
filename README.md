@@ -26,6 +26,7 @@ Interface available in **English**, **繁體中文** and **简体中文** (follo
 - Covers from `cover:` frontmatter, first embedded image, image files themselves, PDF first pages, web page `og:image` for link notes, and video first frames (or a same-name image next to the video)
 - Excalidraw drawings render as thumbnails of the drawing itself (rendered in the background through the Excalidraw plugin; only for cards on screen)
 - Pin cards to top, per-card background colors, multi-select with batch move / delete (optionally removing orphaned attachments) / copy-wiki-links
+- Rename cards directly: select and press `F2`, or right-click → **Rename** (desktop; wiki links are updated vault-wide)
 - Canvas and Base files render as cards too (Canvas uses its first embedded image as the cover when available)
 
 ### Image card layouts

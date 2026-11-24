@@ -1568,6 +1568,15 @@ class GalleryView extends ItemView {
       } else if (e.key === 'Escape' && this._hover && this.selected && this.selected.size) {
         // 跟 Cmd+A 一樣要求滑鼠在本視圖上：否則在別的面板按 Esc 會順手清掉畫廊的多選
         this.clearSel();
+      } else if (e.key === 'F2') {
+        /* F2 ＝ 重新命名（Windows 資源管理器／macOS Finder 的慣例鍵，2026-11-24）。
+           跟 Cmd+A／Esc 一樣要求滑鼠在本視圖上：游標停在筆記編輯器裡按 F2，
+           不該去改畫廊上「上次選取」的那個檔案。
+           沒有選取就完全不插手 —— 事件原樣放行，交給系統或其他外掛。 */
+        if (!this._hover) return;
+        if (!this.selected.size && !this.selFolders.size) return;
+        e.preventDefault();
+        this.renameSelected();
       }
     });
   }
@@ -5775,6 +5784,55 @@ class GalleryView extends ItemView {
     this.selAnchor = null;
     this.updateSelBar();
   }
+
+  /* ===== 重新命名（2026-11-24）=====
+     卡片牆本來只有資料夾列能按 Enter 原地改名，卡片本身沒有任何改名入口
+     （只能切回原生檔案總管）。這裡補上 F2 與右鍵選單：
+       • 卡片 → 交給 Obsidian 的 fileManager.promptForFileRename（見 renameOne）
+       • 資料夾 → 沿用左樹既有的原地改名，列不在畫面上才退回同一支對話框
+
+     ⚠️ 多選時不猜對象：一次只開一個輸入框，猜錯就是改錯檔。直接提示。 */
+  renameSelected() {
+    if (this.selected.size) {
+      if (this.selected.size > 1) { new Notice(t('Select a single item to rename')); return; }
+      const path = this.selected.values().next().value;
+      const file = this.app.vault.getAbstractFileByPath(path);
+      /* 檔案在選取之後被別處刪掉了（別的分頁、同步、外部程式）：
+         靜默把這個殘留的選取清掉，不要對著空氣開改名框。 */
+      if (!(file instanceof TFile)) { this.selected.delete(path); this.updateSelBar(); return; }
+      this.renameOne(file);
+      return;
+    }
+    if (this.selFolders.size) {
+      if (this.selFolders.size > 1) { new Notice(t('Select a single item to rename')); return; }
+      const path = this.selFolders.values().next().value;
+      const folder = this.app.vault.getAbstractFileByPath(path);
+      if (!(folder instanceof TFolder)) { this.selFolders.delete(path); this.syncFolderSelMarks(); return; }
+      /* 列還掛在畫面上 → 走建樹時那條原地改名（Enter 用的也是它）；
+         收合的父層或被虛擬化掉才會沒有 DOM，這時退回原生對話框。 */
+      const nameEl = this.folderNameEl(path);
+      if (nameEl) this.inlineRenameFolder(folder, nameEl);
+      else void this.app.fileManager.promptForFileRename(folder);
+    }
+  }
+  /* 資料夾列裡的名稱節點；列不在畫面上就回 null。 */
+  folderNameEl(path) {
+    for (const row of this.folderRowEls()) {
+      if (row.dataset.path === path) return row.querySelector('.gn-tname');
+    }
+    return null;
+  }
+  /* 單一檔案的重新命名（卡片右鍵選單與 F2 共用）。
+     用 Obsidian 自己的 promptForFileRename 而不是自己改：
+       • 重名／非法字元／空名稱由它把關，出錯訊息也是原生的
+       • 會同步更新全庫的 [[wiki 連結]] 與 ![[嵌入]]
+       • 成功後 vault 的 rename 事件照既有管線收尾（封面快取 renameCachedFor、
+         搜尋索引 onFileRenamed、資料夾計數失效…），本外掛不必另外做一次 */
+  renameOne(file) {
+    if (!(file instanceof TFile)) return;
+    void this.app.fileManager.promptForFileRename(file);
+  }
+
   updateSelBar() {
     const bar = this._selBar;
     if (!bar) return;
@@ -6481,6 +6539,8 @@ class GalleryView extends ItemView {
       const menu = new Menu();
       menu.addItem((i) => i.setTitle(t('Open')).setIcon('file').onClick(() => this.openNote(it.file, false)));
       menu.addItem((i) => i.setTitle(t('Open in new tab')).setIcon('plus').onClick(() => this.openNote(it.file, true)));
+      // 重新命名（2026-11-24）：跟原生檔案總管的選單同一個位置（開啟之後）
+      menu.addItem((i) => i.setTitle(t('Rename')).setIcon('pencil').onClick(() => this.renameOne(it.file)));
       menu.addItem((i) => i.setTitle(t('Move to…')).setIcon('folder-input').onClick(() =>
         new FolderSuggest(this.app, (target) => this.moveItem(it.file, target)).open()));
       // 標籤（2026-11-16）：圖片 / PDF 等非 md 也走同一個入口
