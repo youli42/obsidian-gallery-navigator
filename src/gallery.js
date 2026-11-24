@@ -4575,6 +4575,9 @@ class GalleryView extends ItemView {
     }
     this._layout = this.effectiveLayout();   // 熱路徑（makeCard 等）只讀這個快取
     this._treeScrollLock = true;
+    /* 整頁重畫：root 底下（含卡片牆）全部要拆掉 → 先鬆開已解碼的位圖。
+       只在這裡與 beginWall 的清理區塊呼叫；掛載中的卡片絕不呼叫。 */
+    this.releaseImagesIn(root);
     root.empty();
     root.addClass('gn-root');
     /* 以下兩個狀態 class 取代原本的 :has()（2026-07-31）。
@@ -6212,9 +6215,19 @@ class GalleryView extends ItemView {
 
   // 重置一面牆的共用狀態（瀑布流、多選、延遲載入觀察器、動作列）
   beginWall(container) {
-    for (const m of (this._masonries || [])) { try { m.destroy(); } catch (e) {} }
+    /* 舊牆要拆了 → 先鬆開卡片上的 <img> 解碼位圖。
+       ⚠️ 必須在 destroy 之前做：rerenderMain()/renderInner() 的 empty() 只是把卡片
+          拿出文件，masonry 的容器與 virtual 的 grid 仍留著那些 <img>（src 還在），
+          只斷開觀察器不會讓瀏覽器回收已解碼的 bitmap。 */
+    for (const m of (this._masonries || [])) {
+      this.releaseImagesIn(m.container);
+      try { m.destroy(); } catch (e) {}
+    }
     this._masonries = [];
-    for (const v of (this._virtuals || [])) { try { v.destroyAll(); } catch (e) {} }
+    for (const v of (this._virtuals || [])) {
+      this.releaseImagesIn(v.grid);   // 已卸載的不在 DOM 裡，這裡補的是還掛著的
+      try { v.destroyAll(); } catch (e) {}
+    }
     this._virtuals = [];
     this._chunkDrawers = [];   // 分批渲染的「補畫到某張卡」函式，與上面兩者同生命週期
 
@@ -6678,10 +6691,24 @@ class GalleryView extends ItemView {
     return card;
   }
 
+  /* 釋放子樹裡已解碼的位圖：把 <img> 的 src 拿掉，瀏覽器才能丟掉那份 decode 結果。
+     ⚠️ 只對「即將卸載／即將清空」的節點呼叫（虛擬牆卸載、整面牆重建）。
+        掛載中的卡片絕不能碰：src 一拿掉圖就消失，縮圖排隊回呼回來也沒東西可填。
+     只動 src 屬性，不動元素也不動版面 → 排版／量測邏輯完全不受影響。 */
+  releaseImagesIn(rootEl) {
+    if (!rootEl || !rootEl.querySelectorAll) return;
+    for (const im of rootEl.querySelectorAll('img')) {
+      try { im.removeAttribute('src'); } catch (e) {}
+    }
+  }
+
   /* 虛擬化卸載一張卡片前的清理。
      ⚠️ 一定要把 el 從 _cardEls 裡拿掉：那個 Map 是選取、範圍選取、捲動定位共用的
         參照表，留著已移除的節點會讓後續操作對著殭屍元素設 class（看起來像沒反應）。 */
   unregisterCard(el, it) {
+    /* 卡片馬上就要被 el.remove() 拆掉 → 先鬆開解碼位圖，記憶體才不會跟著捲動累積。
+       放在最前面：後面的 early return（路徑不在 _cardEls 裡）也一樣要釋放。 */
+    this.releaseImagesIn(el);
     if (this._ogObserver) { try { this._ogObserver.unobserve(el); } catch (e) {} }
     const arr = this._cardEls && this._cardEls.get(it.file.path);
     if (!arr) return;
@@ -7089,7 +7116,8 @@ class GalleryView extends ItemView {
   }
 
   /* 虛擬化瀑布流：只保留視窗上下各一屏的卡片，其餘拆掉（見 virtual.js）。
-     小資料夾不走這條——幾十張卡全留著沒有成本，反而省下估計/校正的複雜度與跳動。 */
+     門檻見 renderInChunks 的 VIRTUAL_MIN（60 / 80）：門檻以上的資料夾都走這條，
+     常駐卡片數與資料夾大小脫鉤，這是記憶體不會隨瀏覽累積的關鍵。 */
   renderVirtual(container, grid, masonry, notes, opts) {
     // masonry 不再管理項目，收掉以免它的 ResizeObserver 跟 VirtualWall 打架
     try { masonry.destroy(); } catch (e) {}
@@ -7145,9 +7173,14 @@ class GalleryView extends ItemView {
        305 張的資料夾捲半天命中率也才 3% —— 總高度永遠在變。
        這裡改成一開資料夾就整批補，補完存進 dims.json，下次直接命中。 */
     this.startDimPrefetch(notes);
-    /* 超過這個量才虛擬化。門檻不能太低：虛擬化靠估計高度排版，
-       第一次瀏覽（長寬比還沒進索引）捲動會有輕微跳動，小資料夾不值得付這個代價。 */
-    const VIRTUAL_MIN = isMobileUI ? 150 : 300;
+    /* 超過這個量才虛擬化。門檻在 2026-11-24 從 150/300 降到 60/80：
+       一張 640px 縮圖解碼後約 0.9MB（RGBA），非虛擬化的牆會把整個資料夾
+       —— 幾百張 —— 的 <img> 全部留在 DOM 裡，解碼位圖也跟著留在記憶體，
+       換幾個資料夾就累積成看得見的卡頓。門檻降到 80 之後，常駐卡片數由虛擬牆
+       壓在「視窗上下各一屏」，資料夾多大都不再決定記憶體佔用。
+       代價是 80 張以上的資料夾會吃到估計高度排版的小幅跳動 —— 那些人本來就多是
+       虛擬牆的使用者，權衡後仍值得。 */
+    const VIRTUAL_MIN = isMobileUI ? 60 : 80;
     if (this.plugin.state.virtualWall !== false && notes.length >= VIRTUAL_MIN) {
       this.renderVirtual(container, grid, masonry, notes, opts);
       return;
@@ -7173,8 +7206,9 @@ class GalleryView extends ItemView {
     /* 供 setActiveCard() 用：目標卡還沒被畫到時，補畫到它出現為止（2026-08-11）。
        ⚠️ 沒有這條的話，「開筆記自動定位」在超過一批的資料夾裡完全失效 ——
           卡片不在 DOM，cardElsFor() 回空陣列，scrollIntoView 根本沒有對象。
-          批量是 40（手機）/ 120（桌機），而超過 150 / 300 就走虛擬牆，
-          所以這裡最多補幾批，成本有上限。 */
+          批量是 40（手機）/ 120（桌機），門檻是 60 / 80：桌機不到一批就畫完，
+          手機最壞（41–59 張）也只多補一批，成本有上限。
+          （80 以上走虛擬牆，定位交給 VirtualWall.scrollToPath()，不經這裡。） */
     if (!this._chunkDrawers) this._chunkDrawers = [];   // 比照 _virtuals：beginWall 沒跑到也不炸
     this._chunkDrawers.push((wantPath) => {
       const idx = notes.findIndex((n) => n.file && n.file.path === wantPath);
