@@ -1505,8 +1505,15 @@ class GalleryView extends ItemView {
          放在 syncActive 判斷之前：守衛要無條件消耗／清掉，否則會殘留到之後真正的導覽。 */
       if (this.isAfterGalleryTabClose(file)) return;
       if (!this.plugin.state.syncActive) return;
+      /* 只有「畫廊真的看得到」時才跟著切資料夾（2026-11-24）。
+         分頁被別的筆記／圖片／畫布蓋住時（contentEl 寬度 0），照樣跟隨的話，
+         使用者切回 Gallery 會發現左樹已經跑到「那個筆記」的資料夾 ——
+         回報就是這樣變成「切回分頁時目錄樹往上跳一層」。
+         並排分欄、側欄都仍然看得到（寬高 > 0）→ 跟隨行為完全不變。 */
       if (this.isCanvasEmbed(file)) return;   // 在 Canvas 裡點圖片/內嵌節點 → 不要跳去 img/
-      this.syncToFile(file);
+      /* 看不見時（被別的筆記／圖片分頁蓋住）只更新同一面牆的 active 卡片，
+         不准換資料夾 —— 見上面那段說明。 */
+      this.syncToFile(file, this.paneVisible());
     }));
     /* 守衛的收尾（見 isAfterGalleryTabClose）：關分頁時 layout-change 先到、餘波的
        file-open 幾乎同時到。若 1.2 秒內都沒人來消耗、那個分頁也真的關了，代表這次
@@ -1720,7 +1727,10 @@ class GalleryView extends ItemView {
   }
 
   // 把左側樹定位到某檔案：展開祖先、選取資料夾、捲到位、標記 active 卡片
-  syncToFile(file) {
+  /* allowNavigate=false：只更新「同一面牆」上的 active 卡片，不准換資料夾。
+     畫廊被別的筆記分頁蓋住時走這條（見 onOpen 的 file-open 監聽），
+     否則切回分頁會發現左樹已經跑到那個筆記的資料夾。 */
+  syncToFile(file, allowNavigate = true) {
     if (this.drag) return;                        // 拖曳進行中 → 不重繪，避免中斷拖曳
     if (this.plugin.state.leftMode === 'tag') return;   // 標籤模式不做資料夾定位
     if (!(file instanceof TFile)) return;
@@ -1739,6 +1749,7 @@ class GalleryView extends ItemView {
       });
       return;
     }
+    if (!allowNavigate) return;   // 看不見時不換資料夾（同上一面牆的 active 卡片已在上面處理）
     const parent = file.parent;
     const folderPath = parent && parent.path !== '/' ? parent.path : '';
     const expanded = new Set(this.plugin.state.expandedFolders || []);
