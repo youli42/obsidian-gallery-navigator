@@ -1598,7 +1598,6 @@ class GalleryView extends ItemView {
            不該去改畫廊上「上次選取」的那個檔案。
            沒有選取就完全不插手 —— 事件原樣放行，交給系統或其他外掛。 */
         if (!this.hasPointerOrFocus()) return;
-        if (!this.selected.size && !this.selFolders.size) return;
         e.preventDefault();
         this.renameSelected();
       }
@@ -5897,29 +5896,69 @@ class GalleryView extends ItemView {
        • 卡片 → 交給 Obsidian 的 fileManager.promptForFileRename（見 renameOne）
        • 資料夾 → 沿用左樹既有的原地改名，列不在畫面上才退回同一支對話框
 
-     ⚠️ 多選時不猜對象：一次只開一個輸入框，猜錯就是改錯檔。直接提示。 */
+     ⚠️ 多選時不猜對象：一次只開一個輸入框，猜錯就是改錯檔。直接提示。
+     ⚠️ 對象的優先序看「使用者在哪裡」（2026-11-24 使用者要求 F2 在目錄樹也要生效）：
+        ① 滑鼠在卡片區且選了卡片 → 卡片
+        ② 滑鼠在左樹（或焦點停在資料夾列）→ 資料夾（焦點那列優先，否則目前資料夾）
+        ③ 有選取（卡片或資料夾）→ 依選取
+        ④ 什麼都沒選 → 目前資料夾（檔案總管：樹上那列就是「選取中」） */
   renameSelected() {
-    if (this.selected.size) {
-      if (this.selected.size > 1) { new Notice(t('Select a single item to rename')); return; }
-      const path = this.selected.values().next().value;
-      const file = this.app.vault.getAbstractFileByPath(path);
-      /* 檔案在選取之後被別處刪掉了（別的分頁、同步、外部程式）：
-         靜默把這個殘留的選取清掉，不要對著空氣開改名框。 */
-      if (!(file instanceof TFile)) { this.selected.delete(path); this.updateSelBar(); return; }
-      this.renameOne(file);
-      return;
-    }
+    const row = this.focusedFolderRow();
+    const overMain = !!(this._main && this._main.matches && this._main.matches(':hover'));
+    const overTree = this.pointerOverTree();
+    // ① 卡片（只看得到、又有選取的才輪到它）
+    if (overMain && this.selected.size) { this.renameSelectionFiles(); return; }
+    // ② 左樹
+    if (overTree) { this.renameFolderPath(row ? row.dataset.path : this.path); return; }
+    if (row) { this.renameFolderPath(row.dataset.path); return; }
+    // ③ 選取
+    if (this.selected.size) { this.renameSelectionFiles(); return; }
     if (this.selFolders.size) {
       if (this.selFolders.size > 1) { new Notice(t('Select a single item to rename')); return; }
-      const path = this.selFolders.values().next().value;
-      const folder = this.app.vault.getAbstractFileByPath(path);
-      if (!(folder instanceof TFolder)) { this.selFolders.delete(path); this.syncFolderSelMarks(); return; }
-      /* 列還掛在畫面上 → 走建樹時那條原地改名（Enter 用的也是它）；
-         收合的父層或被虛擬化掉才會沒有 DOM，這時退回原生對話框。 */
-      const nameEl = this.folderNameEl(path);
-      if (nameEl) this.inlineRenameFolder(folder, nameEl);
-      else void this.app.fileManager.promptForFileRename(folder);
+      this.renameFolderPath(this.selFolders.values().next().value);
+      return;
     }
+    // ④ 沒選取 → 目前資料夾
+    this.renameFolderPath(this.path);
+  }
+
+  /* 選取的卡片（0/1/N 張）：多選只提示，不猜對象。 */
+  renameSelectionFiles() {
+    if (this.selected.size > 1) { new Notice(t('Select a single item to rename')); return; }
+    const path = this.selected.values().next().value;
+    const file = this.app.vault.getAbstractFileByPath(path);
+    /* 檔案在選取之後被別處刪掉了（別的分頁、同步、外部程式）：
+       靜默把這個殘留的選取清掉，不要對著空氣開改名框。 */
+    if (!(file instanceof TFile)) { this.selected.delete(path); this.updateSelBar(); return; }
+    this.renameOne(file);
+  }
+
+  /* 按路徑改資料夾名：列還掛在畫面上就走原地改名（Enter 用的也是它），
+     收合的父層／虛擬化掉才退回原生對話框。根目錄不可改名。 */
+  renameFolderPath(path) {
+    const p = path == null ? '' : String(path);
+    const folder = p === '' ? this.app.vault.getRoot() : this.app.vault.getAbstractFileByPath(p);
+    if (!(folder instanceof TFolder)) return;
+    if (folder.path === '/') { new Notice(t('Cannot rename this folder')); return; }
+    const nameEl = this.folderNameEl(folder.path);
+    if (nameEl) this.inlineRenameFolder(folder, nameEl);
+    else void this.app.fileManager.promptForFileRename(folder);
+  }
+
+  /* 滑鼠是不是停在左樹上（F2 判斷對象用；:hover 不會漏事件）。 */
+  pointerOverTree() {
+    try { return !!(this._treeScroll && this._treeScroll.isConnected && this._treeScroll.matches(':hover')); } catch (e) { return false; }
+  }
+
+  /* 焦點所在的資料夾列（點過樹上資料夾、或 Tab 移動過去）。 */
+  focusedFolderRow() {
+    try {
+      const doc = (this.contentEl && this.contentEl.doc) || document;
+      const el = doc.activeElement;
+      if (!el || !el.closest) return null;
+      const row = el.closest('.gn-tnode[data-gn-folder]');
+      return row && this.contentEl.contains(row) ? row : null;
+    } catch (e) { return null; }
   }
   /* 資料夾列裡的名稱節點；列不在畫面上就回 null。 */
   folderNameEl(path) {
