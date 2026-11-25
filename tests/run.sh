@@ -22,6 +22,8 @@ echo "== 資料夾列點擊（展開／再點收合，同一個資料夾不重�
 node --no-warnings tests/folder-click.test.js
 echo "== 新增檔案後的刷新範圍（別的資料夾新增不重畫卡片牆）"
 node --no-warnings tests/create-refresh.test.js
+echo "== 大圖不退回原圖＋縮圖佇列大檔獨佔"
+node --no-warnings tests/huge-image.test.js
 echo "== 手機資料夾排序（無頭瀏覽器模擬觸控）"
 python3 tests/reorder-harness.py
 echo "== 手機點過之後 hover 不黏住、桌機 hover 還在"

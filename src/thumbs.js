@@ -38,6 +38,32 @@ const SKIP_UNDER_BYTES = 200 * 1024; // 小於此大小的圖不處理（省下�
 const SKIP_EXT = /\.(gif|svg)$/i;    // GIF 會失去動畫、SVG 是向量，都不轉
 const IS_IMG = /\.(png|jpe?g|webp|bmp|avif)$/i;
 
+/* 「大原圖」門檻（2026-11-25）：卡片牆在**沒有縮圖**時能不能直接退回原圖。
+   實測（vault 裡 3 張 20–41MB 的 PNG）：
+     · 縮圖生成失敗 → 卡片退回原圖 → 8192×4096 單張解碼約 134MB
+     · 一屏十幾張同時在牆上 → 渲染程序峰值 1689MB（+992MB）
+     · 而且原圖解碼把記憶體吃滿後，縮圖佇列更生不出來 → 失敗自我強化
+   所以大圖一律不退回原圖，改成檔型圖示（見 gallery.js 的 showNoThumbCard）。
+   判定同時看檔案大小與已知長寬比：高度壓縮的 JPEG 檔案很小、解碼後仍然很大。 */
+const ORIGINAL_FALLBACK_MAX_BYTES = 1024 * 1024;   // 1MB
+const ORIGINAL_FALLBACK_MAX_DIM = 2000;            // 長邊 2000px
+/* 大檔獨佔：解碼後 ≥32MB 的原圖一次只解一張（兩張同時解，峰值就是單張兩倍）。
+   優先看長寬比（真正決定點陣圖大小），尺寸未知才用檔案大小當退路：
+   實測 8192×4096 的 PNG 解碼約 134MB，兩張並行就吃掉 268MB。 */
+const LARGE_DECODE_BYTES = 32 * 1024 * 1024;   // ≈ 2900×2900×4
+const LARGE_FILE_BYTES = 8 * 1024 * 1024;      // 尺寸未知時：≥8MB 也算大圖
+
+function isHeavyDecode(file, dim) {
+  if (dim && dim[0] > 0 && dim[1] > 0) return dim[0] * dim[1] * 4 >= LARGE_DECODE_BYTES;
+  return ((file && file.stat && file.stat.size) || 0) >= LARGE_FILE_BYTES;
+}
+
+function isHugeImage(file, dim) {
+  const size = (file && file.stat && file.stat.size) || 0;
+  if (size > ORIGINAL_FALLBACK_MAX_BYTES) return true;
+  return !!(dim && dim[0] > 0 && dim[1] > 0 && Math.max(dim[0], dim[1]) > ORIGINAL_FALLBACK_MAX_DIM);
+}
+
 /* 縮圖檔名用的 hash。
    ⚠️ 原本是單一 32-bit djb2，數千張圖的規模下生日碰撞約千分之一量級 ——
       撞到就是兩個不同路徑共用同一個檔名，互相覆蓋、卡片顯示錯圖（很難查的那種 bug）。
@@ -176,6 +202,14 @@ class ThumbCache {
       /* LIFO（pop 而非 shift）：最後排進來的＝使用者剛捲到的那一屏。
          FIFO 會先做早就捲過去、現在根本看不到的卡片，可視區反而一直等。
          （被壓在底下的舊項目仍會做完，只是排在後面。） */
+      const next = this.queue[this.queue.length - 1];
+      /* 大圖獨佔（2026-11-25）：解碼後 ≥32MB 的原圖自己一張一張解。
+         兩張 8192×4096 的 PNG 同時 createImageBitmap，峰值是單張的兩倍
+         （實測 +992MB 那次就是這樣疊出來的）。排在後面的一般圖等一下沒關係 ——
+         LIFO 本來就先做最近的。 */
+      const nextDim = next && next.file && this.plugin && this.plugin._dimIndex
+        ? this.plugin._dimIndex[next.file.path] : null;
+      if (this.busy > 0 && isHeavyDecode(next && next.file, nextDim)) break;
       const item = this.queue.pop();
       this.busy++;
       this._make(item.file)
@@ -269,6 +303,9 @@ class ThumbCache {
       return a.getResourcePath(this.dir() + '/' + fname);
     } catch (e) {
       this.failed.add(file.path);   // 本階段不再重試（避免每次重繪都重新解碼一次壞檔）
+      /* 原本這裡完全靜默：縮圖生不出來 → 卡片退回原圖 → 記憶體爆掉，卻沒有任何線索。
+         留一行警告（每個路徑只會走到這裡一次），之後查「為什麼某張圖沒縮圖」有依據。 */
+      console.warn('[Gallery Navigator] 縮圖生成失敗：' + file.path, e);
       return null;
     } finally {
       if (bmp) { try { bmp.close(); } catch (e) {} }
@@ -310,4 +347,4 @@ class ThumbCache {
   }
 }
 
-module.exports = { ThumbCache, THUMB_MAX };
+module.exports = { ThumbCache, THUMB_MAX, isHugeImage, isHeavyDecode, ORIGINAL_FALLBACK_MAX_BYTES, ORIGINAL_FALLBACK_MAX_DIM, LARGE_DECODE_BYTES };

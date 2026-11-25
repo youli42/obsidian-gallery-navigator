@@ -26,6 +26,10 @@
 const CONCURRENCY_DESKTOP = 4;
 const CONCURRENCY_MOBILE = 2;
 const BATCH_NOTIFY = 40;   // 每補齊這麼多筆就回報一次，讓版面漸進收斂而不是等到最後
+/* 大檔獨佔（2026-11-25）：量尺寸也是真的把原圖載進來。
+   4 張 20–40MB 的 PNG 同時載入，峰值就是 4 份檔案緩衝（實測 3 張 +87MB）；
+   換成大圖一次只量一張，其餘照舊並行。 */
+const LARGE_FILE_BYTES = 8 * 1024 * 1024;
 
 class DimPrefetcher {
   constructor(plugin) {
@@ -65,7 +69,7 @@ class DimPrefetcher {
         }
         continue;
       }
-      want.push({ key, src: it.src });
+      want.push({ key, src: it.src, size: (it.file.stat && it.file.stat.size) || 0 });
     }
     if (!want.length) return 0;
 
@@ -97,6 +101,9 @@ class DimPrefetcher {
   _pump() {
     const limit = this.limit();
     while (this.busy < limit && this.queue.length) {
+      /* 大檔獨佔：≥8MB 的原圖一次只量一張（忙的時候先讓小的過，別擋住整條佇列）。 */
+      const head = this.queue[0];
+      if (head && (head.size || 0) >= LARGE_FILE_BYTES && this.busy > 0) break;
       const my = this.token;
       const job = this.queue.shift();
       this.busy++;

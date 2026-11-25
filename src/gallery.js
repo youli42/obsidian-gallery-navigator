@@ -8,7 +8,7 @@
 
 const { Plugin, ItemView, MarkdownView, TFolder, TFile, Menu, FuzzySuggestModal, SuggestModal, Notice, setIcon, addIcon, getIconIds, Modal, requestUrl, PluginSettingTab, Setting, loadPdfJs } = require('obsidian');
 const { t, setLang, isZh } = require('./i18n.js');
-const { ThumbCache } = require('./thumbs.js');
+const { ThumbCache, isHugeImage } = require('./thumbs.js');
 const { CoverCache, DEFAULT_MB_DESKTOP, DEFAULT_MB_MOBILE, MIN_MB, MAX_MB } = require('./covercache.js');
 const { VIDEO_EXT, videoSiblingCover, shouldGrabVideoFrame, grabVideoFrame, MAX_SOURCE_MB_DESKTOP, MAX_SOURCE_MB_MOBILE, MIN_MAX_SOURCE_MB, MAX_MAX_SOURCE_MB } = require('./videocover.js');
 const { DimPrefetcher } = require('./dims.js');
@@ -3755,11 +3755,34 @@ class GalleryView extends ItemView {
     // 先用長寬比佔好高度（若已知），避免縮圖填入時整牆重排
     this.applyDim(img, it);
     img.addClass('gn-img-pending');
+    /* 做不出縮圖時能不能退回原圖（2026-11-25）：
+       小圖（<1MB 且長邊 ≤2000）才准退；大圖退回原圖等於把縮圖管線作廢 ——
+       一張 20MB PNG 解碼 67–134MB，一屏十幾張就是 GB 級，還會回頭把縮圖佇列擠死。
+       大圖改成檔型圖示卡（同 PDF／影片失敗時的樣子）。 */
+    const huge = isHugeImage(target, (this.plugin._dimIndex || {})[target.path]);
     this.plugin.thumbs.request(target, (url) => {
       if (!img.isConnected) return;                 // 已經捲走 / 重畫過了
       img.removeClass('gn-img-pending');
-      img.src = url || it.src;                      // 做不出縮圖 → 退回原圖
+      if (url) { img.src = url; return; }
+      if (huge) { this.showNoThumbCard(img, it); return; }
+      img.src = it.src;                             // 小圖：退回原圖成本可接受
     });
+  }
+
+  /* 大圖拿不到縮圖（生成失敗／記憶體不足）→ 改成檔型圖示卡，**絕不**載原圖。
+     樣式沿用「非 md 且無封面」那條分支的 .gn-fileicon ＋ .gn-icon-cover，
+     所以外觀和其他檔型卡一致，也不會多一份新 CSS。 */
+  showNoThumbCard(img, it) {
+    const card = img.parentElement;
+    img.remove();
+    if (!card) return;
+    if (!card.hasClass('gn-icon-cover')) {
+      card.addClass('gn-icon-cover');
+      const ph = card.createDiv('gn-fileicon');
+      setIconCached(ph.createDiv('gn-fileicon-ic'), iconForExt(it.ext));
+      ph.createSpan('gn-fileicon-label').setText(it.ext.toUpperCase());
+    }
+    this.relayoutWalls(card);
   }
 
   applyDim(img, itOrKey) {
