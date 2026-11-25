@@ -4216,8 +4216,11 @@ class GalleryView extends ItemView {
     if (this.selFolders.size) this.clearFolderSel();
 
     const path = folder.path;
-    // 已經停在這個資料夾（而且沒在搜尋）→ 這一下只是在開合左樹，卡片牆不動
-    const same = this.path === path && !this._searchQ && !this._searchOn;
+    /* 已經停在這個資料夾（沒在搜尋、也沒有套用卡片篩選）→ 這一下只是在開合左樹，卡片牆不動。
+       有篩選時仍然要重畫：點的動作本來就順便清掉篩選（原本每次點列都會 resetCardFilters），
+       牆上的內容會變，不重畫就會留下「篩選還生效」的舊畫面。 */
+    const filtering = !!((this._tagFilter && this._tagFilter.size) || (this._typeFilter && this._typeFilter.size));
+    const same = this.path === path && !this._searchQ && !this._searchOn && !filtering;
 
     // 展開／收合（收合要整列再點一次）
     if (hasKids) {
@@ -5151,9 +5154,11 @@ class GalleryView extends ItemView {
     rootSlot.thumb.addClass('gn-tthumb-home');
     setIcon(rootSlot.thumb, 'home');   // 根目錄＝家（2026-07-18）
     rootRow.createSpan('gn-tname').setText(this.app.vault.getName());  // 動態 vault 名（原本寫死）
-    /* 已經在根目錄又點一次 → 什麼都不必做（重畫只會閃一下、丟捲動位置）。 */
+    /* 已經在根目錄又點一次 → 什麼都不必做（重畫只會閃一下、丟捲動位置）。
+       套用卡片篩選時例外：點根目錄原本就順便清篩選，牆上的內容會變，要走 navigate()。 */
     rootRow.onclick = () => {
-      if (!this.path && !this._searchQ && !this._searchOn) return;
+      const filtering = !!((this._tagFilter && this._tagFilter.size) || (this._typeFilter && this._typeFilter.size));
+      if (!this.path && !this._searchQ && !this._searchOn && !filtering) return;
       this.navigate('');
     };
     this.wireMoveTarget(rootRow, '', 'gn-tmove');

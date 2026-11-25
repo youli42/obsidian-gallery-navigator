@@ -92,6 +92,14 @@ const folder = (p) => ({ path: p, name: p.split('/').pop() });
   assert.ok(v.calls.includes('clearSearch'), '要離開搜尋狀態');
   ok('搜尋中點目前資料夾 → 重畫並離開搜尋');
 
+  // 5b. 目前資料夾套了卡片篩選時再點：要重畫並清掉篩選（保留原本行為）
+  v = makeView({ path: 'A', expanded: ['A'] });
+  v._typeFilter = new Set(['image']);
+  v.clickFolderRow(folder('A'), true, {});
+  assert.ok(v.calls.includes('render'), '有篩選時卡片牆會變 → 要重畫');
+  assert.ok(v.calls.includes('resetFilters'), '要清掉上一個資料夾的篩選');
+  ok('有卡片篩選時點目前資料夾 → 重畫並清篩選');
+
   // 6. 多選（修飾鍵）優先：不導覽、不開合
   v = makeView({ path: 'A', expanded: [] });
   v.clickFolderRow(folder('B'), true, { ctrlKey: true, preventDefault() {} });
