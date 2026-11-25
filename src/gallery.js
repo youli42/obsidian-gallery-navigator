@@ -4074,6 +4074,28 @@ class GalleryView extends ItemView {
     }
   }
 
+  /* 新增檔案／資料夾之後，這面牆會不會變？（plugin.refreshViewsAfterCreate 逐個 view 問）
+     回 false 代表只影響左樹（檔案數／新資料夾列）→ 只 refreshTree()，卡片牆完全不動。
+     ⚠️ 這是「在別的資料夾新增檔案，正在看的這一面牆卻整頁重畫」的修正（2026-11-25）。 */
+  wallAffectedByCreate(path) {
+    const raw = path == null ? '' : String(path);
+    if (!raw) return true;                                   // 不知道多了什麼 → 保守重畫
+    if (this._searchQ) return true;                          // 搜尋牆：任何新檔都可能命中
+    if (this.plugin.state.leftMode === 'tag') return true;   // 標籤牆：新檔可能帶標籤
+    let target = null;
+    try { target = this.app.vault.getAbstractFileByPath(raw); } catch (e) { target = null; }
+    if (!target) return true;                                // 檔案系統狀態不明 → 保守重畫
+    /* 資料夾本身不會出現在卡片牆（牆上只有檔案）；剛建好的空資料夾也沒有卡片。
+       裡面的檔案各自會再觸發一次 create，那時才判斷。 */
+    if (target instanceof TFolder) return false;
+    const parent = target.parent ? target.parent.path : '';
+    const parentKey = parent === '/' ? '' : parent;
+    const cur = this.path || '';
+    if (parentKey === cur) return true;                      // 就在目前這個資料夾
+    if (!this.plugin.state.flattenFolders) return false;
+    return cur === '' || parentKey.startsWith(cur + '/');    // 攤平：子孫資料夾的檔案也在牆上
+  }
+
   // 只重畫左樹（展開/收合/最愛/資料夾配色用）；沒左樹快取就退回整頁
   refreshTree() {
     if (this._treeScroll && this._treeScroll.isConnected && this._buildTree) {
@@ -8331,9 +8353,15 @@ class GalleryPlugin extends Plugin {
       invalidateCoverCache();      // 結構變動：封面可能指向被改名/刪除的檔案 → 整份清掉
       this.refreshViews();
     };
-    // 'create' 延到 layout ready 後註冊：啟動期數千次回呼會反覆清快取、順延 debounce
+    /* 'create' 延到 layout ready 後註冊：啟動期數千次回呼會反覆清快取、順延 debounce。
+       ⚠️ 新增**不走** onVaultChange（那會整頁重畫，見 refreshViewsAfterCreate）：
+          在別的資料夾新增檔案／圖片時，正在看的這面牆根本沒變。 */
     this.app.workspace.onLayoutReady(() => {
-      this.registerEvent(this.app.vault.on('create', onVaultChange));
+      this.registerEvent(this.app.vault.on('create', (f) => {
+        invalidateFolderCounts();
+        invalidateCoverCache();
+        this.refreshViewsAfterCreate(f && f.path);
+      }));
     });
     /* 刪除／改名時同步回收 og 圖與兩份索引。
        以前兩份索引都以路徑為 key、卻沒人在檔案消失時清掉 → 圖檔與索引項永久成為孤兒。 */
@@ -8838,6 +8866,36 @@ class GalleryPlugin extends Plugin {
       if (view instanceof GalleryView) view.invalidateTagIndex();
     });
     this.refreshViews();
+  }
+
+  /* 新增檔案／資料夾後的更新（2026-11-25）。
+     舊行為：create → onVaultChange → refreshViews()，不管新檔案在哪個資料夾，
+     所有開著的畫廊都整頁 render() —— 卡片牆砍掉重建、捲動位置丟掉、
+     縮圖重新解碼，即使新增的檔案根本不在畫面上這面牆裡。
+     新行為：先問每個 view「這面牆會不會變」（wallAffectedByCreate）：
+       · 會變 → render()（新卡片要出現在牆上）
+       · 不會 → 只 refreshTree()（左樹的檔案數／新資料夾列一定要更新）
+     ⚠️ 同一批 create 要一起判斷：sync 一次進 50 張圖時，只要有一張落在牆上就該重畫，
+        所以把路徑累積起來，去抖結束後一次問。 */
+  refreshViewsAfterCreate(path) {
+    if (!this._createdPaths) this._createdPaths = [];
+    this._createdPaths.push(path || '');   // 路徑不明 → 空字串，wallAffectedByCreate 會保守重畫
+    clearTimeout(this._createRefreshT);
+    this._createRefreshT = setTimeout(() => {
+      this._createRefreshT = null;
+      const paths = this._createdPaths || [];
+      this._createdPaths = [];
+      this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => {
+        const view = leaf.view;
+        if (!(view instanceof GalleryView) || view.drag) return;
+        /* 看不見的畫廊：重建 DOM 白付成本（見 refreshViews 的說明）。
+           一律留旗標，等它真的被顯示出來再畫 —— 那時左樹與卡片牆都會是新資料。 */
+        if (!view.contentEl || view.contentEl.clientWidth <= 0) { view._needsRender = true; return; }
+        const wallChanged = paths.some((p) => view.wallAffectedByCreate(p));
+        if (wallChanged) view.render();
+        else view.refreshTree();
+      });
+    }, 150);
   }
 
   refreshViews() {
