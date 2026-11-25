@@ -18,6 +18,8 @@ echo "== 設定合併（三方合併的純函式）"
 node --no-warnings tests/statesync.test.js
 echo "== 兩台裝置共用 data.json（用外掛真正的存檔／拉取方法）"
 node --no-warnings tests/plugin-state.test.js
+echo "== 資料夾列點擊（展開／再點收合，同一個資料夾不重畫卡片牆）"
+node --no-warnings tests/folder-click.test.js
 echo "== 手機資料夾排序（無頭瀏覽器模擬觸控）"
 python3 tests/reorder-harness.py
 echo "== 手機點過之後 hover 不黏住、桌機 hover 還在"

@@ -4165,6 +4165,62 @@ class GalleryView extends ItemView {
     this.refreshTree();
   }
 
+  /* 點左樹的資料夾列（行內 handler 只把參數轉進來，邏輯集中在這裡）。
+     手感比照系統檔案樹：
+       · 點一個資料夾 → 展開它，並切到它的卡片牆；
+       · 再點同一個資料夾 → 收起來。
+     ⚠️ 同一個資料夾再點一次時**不重畫卡片牆**（2026-11-25）：
+        路徑沒變，牆上的內容一模一樣，整頁 render() 只會丟掉捲動位置、
+        重新解一次縮圖，畫面還會閃一下。這裡只 refreshTree() 更新左樹的開合。
+     ⚠️ 2026-11-18 的決定是「點列只展開、收合只能按箭頭」；使用者要求整列再點
+        一次就收合，所以箭頭不再是唯一入口（箭頭仍然可用，兩者共用 toggleExpand）。 */
+  clickFolderRow(folder, hasKids, e) {
+    const ev = e || {};
+    if (this.folderReorderMode) { if (ev.preventDefault) ev.preventDefault(); return; }
+    /* ── 多選優先（2026-08-18）──
+       桌機用修飾鍵，手機用 folderSelMode（長按選單進入）。擺在最前面：
+       一旦在多選，這一下就不該再導覽。 */
+    if (this.folderSelMode || ev.metaKey || ev.ctrlKey) {
+      if (ev.preventDefault) ev.preventDefault();
+      this.toggleFolderSel(folder.path);
+      return;
+    }
+    if (ev.shiftKey && this.folderSelAnchor) {
+      if (ev.preventDefault) ev.preventDefault();
+      this.rangeFolderSel(this.folderSelAnchor, folder.path);
+      return;
+    }
+    // 沒按修飾鍵的普通點擊 → 離開多選，回到單選導覽（比照 Finder）
+    if (this.selFolders.size) this.clearFolderSel();
+
+    const path = folder.path;
+    // 已經停在這個資料夾（而且沒在搜尋）→ 這一下只是在開合左樹，卡片牆不動
+    const same = this.path === path && !this._searchQ && !this._searchOn;
+
+    // 展開／收合（收合要整列再點一次）
+    if (hasKids) {
+      const expandedSet = new Set(this.plugin.state.expandedFolders || []);
+      if (expandedSet.has(path)) expandedSet.delete(path);
+      else expandedSet.add(path);
+      this.plugin.state.expandedFolders = [...expandedSet];
+    }
+
+    this._focusTreeSel = path;   // 選後聚焦此列，讓 Enter 能改名
+    if (same) {
+      this.plugin.saveState();
+      this.refreshTree();        // 只重畫左樹
+      return;
+    }
+
+    this.clearSearchState();
+    this.path = path;
+    this.plugin.state.lastPath = path;
+    this.resetCardFilters();     // 切换文件夹 → 清掉上一个文件夹的标签／类型筛选
+    this.plugin.saveState();
+    this.render();
+    this.gotoCardsMobile();
+  }
+
   // 清掉所有樹狀列的拖曳落點提示
   clearDropHints() {
     this.contentEl.findAll('.gn-tnode').forEach((el) => el.removeClass('gn-tmove', 'gn-tbefore', 'gn-tafter'));
@@ -5073,7 +5129,11 @@ class GalleryView extends ItemView {
     rootSlot.thumb.addClass('gn-tthumb-home');
     setIcon(rootSlot.thumb, 'home');   // 根目錄＝家（2026-07-18）
     rootRow.createSpan('gn-tname').setText(this.app.vault.getName());  // 動態 vault 名（原本寫死）
-    rootRow.onclick = () => this.navigate('');
+    /* 已經在根目錄又點一次 → 什麼都不必做（重畫只會閃一下、丟捲動位置）。 */
+    rootRow.onclick = () => {
+      if (!this.path && !this._searchQ && !this._searchOn) return;
+      this.navigate('');
+    };
     this.wireMoveTarget(rootRow, '', 'gn-tmove');
     this.wireContextMenu(rootRow, () => this.folderContextMenu(this.app.vault.getRoot()));
 
@@ -5142,46 +5202,9 @@ class GalleryView extends ItemView {
           this.inlineRenameFolder(it.folder, nameEl);
         };
 
-        // 點整列 = 選取；桌機同時展開（比照系統檔案樹）。收合交給箭頭。
-        row.onclick = (e) => {
-          /* 排序模式：點列不做事。手指在把手附近放開很容易被當成點了這一列，
-             手機上那會直接滑去右邊的卡片牆，排到一半畫面就跑了。
-             （展開／收合的箭頭有自己的 onclick 且 stopPropagation，不受影響。） */
-          if (this.folderReorderMode) { e.preventDefault(); return; }
-          /* ── 多選優先（2026-08-18）──
-             桌機用修飾鍵，手機用 folderSelMode（長按選單進入）。擺在最前面：
-             一旦在多選，這一下就不該再導覽。 */
-          if (this.folderSelMode || e.metaKey || e.ctrlKey) {
-            e.preventDefault();
-            this.toggleFolderSel(it.folder.path);
-            return;
-          }
-          if (e.shiftKey && this.folderSelAnchor) {
-            e.preventDefault();
-            this.rangeFolderSel(this.folderSelAnchor, it.folder.path);
-            return;
-          }
-          // 沒按修飾鍵的普通點擊 → 離開多選，回到單選導覽（比照 Finder）
-          if (this.selFolders.size) this.clearFolderSel();
-
-          /* 系統檔案樹行為：點一下就選取並展開（已展開則保持展開）。
-             收合只走箭頭，避免使用者點資料夾看內容時被反覆收合。 */
-          if (hasKids) {
-            const expandedSet = new Set(state.expandedFolders || []);
-            if (!expandedSet.has(it.folder.path)) {
-              expandedSet.add(it.folder.path);
-              state.expandedFolders = [...expandedSet];
-            }
-          }
-          this.clearSearchState();
-          this.path = it.folder.path;
-          state.lastPath = it.folder.path;
-          this._focusTreeSel = it.folder.path;   // 選後聚焦此列，讓 Enter 能改名
-          this.resetCardFilters();           // 切换文件夹 → 清掉上一个文件夹的标签／类型筛选
-          this.plugin.saveState();
-          this.render();
-          this.gotoCardsMobile();
-        };
+        /* 點整列：切換資料夾＋開合（同一個資料夾再點一次就收合）。
+           細節都在 clickFolderRow：那裡才有「路徑沒變就不重畫卡片牆」的判斷。 */
+        row.onclick = (e) => this.clickFolderRow(it.folder, hasKids, e);
 
         this.wireContextMenu(row, () => {
           if (this.folderReorderMode) return null;   // 排序模式中長按不開選單
